@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+out/
+
+# generated motion assets (video/GIF are large; regenerate locally)
+*.mp4
+*.webm
+*.mov
+
+# caches
+.cache/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
