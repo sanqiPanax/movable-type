@@ -835,6 +835,15 @@ def main():
     items = data["items"]
     log("数据 %s | 条目 %d" % (data.get("generated_at", "?")[:16], len(items)))
 
+    # 阶段A: 报道身份入库(幂等)。DB 挂了不许拖垮出报(规格 §1: 缓存新闻仍可生成报纸)
+    try:
+        import newsdesk_db
+        r = newsdesk_db.import_snapshot(data)
+        log("入库: 新报道 %d | 升版本 %d | 跳过 %d | run#%d"
+            % (r["new"], r["updated"], r["skipped"], r["run_id"]))
+    except Exception as e:
+        log("入库失败(不影响出报): %r" % e)
+
     cands = coarse(items)
     log("粗筛候选 %d" % len(cands))
 
