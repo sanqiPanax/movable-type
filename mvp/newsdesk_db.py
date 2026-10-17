@@ -16,6 +16,7 @@
 代码内: import newsdesk_db; newsdesk_db.import_snapshot(data)
 """
 import datetime
+import difflib
 import hashlib
 import json
 import os
@@ -95,7 +96,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS nodes (
   node_id     TEXT PRIMARY KEY,                 -- n_<sha1(event+article)12>
   event_id    TEXT,
-  article_id  TEXT,
+  article_id  TEXT,                             -- 主报道(向后兼容;真实多来源看 node_evidence)
   node_type   TEXT,                             -- origin(创始) | direct(直接进展)
   occurred_at TEXT,                             -- 发生/发表时间(原始时区)
   occurred_precision TEXT,
@@ -116,6 +117,16 @@ CREATE TABLE IF NOT EXISTS follows (
   last_read_seq INTEGER DEFAULT 0,
   UNIQUE(user_local, event_id)
 );
+-- ============ 阶段C: 节点证据(SPEC §5第五步"同事实转述合并到同一节点,保留多个来源") ============
+CREATE TABLE IF NOT EXISTS node_evidence (
+  node_id     TEXT,
+  article_id  TEXT,
+  role        TEXT DEFAULT 'support',           -- primary(主报道) | support(转述/补充来源)
+  added_at    TEXT,
+  added_run   INTEGER,
+  PRIMARY KEY (node_id, article_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ev_node ON node_evidence(node_id);
 """
 
 
@@ -328,6 +339,9 @@ def track_article(article_id, db_path=None):
                 "occurred_at,occurred_precision,seq,created_at) VALUES(?,?,?,?,?,?,?,?)",
                 ("n_" + event_id[2:], event_id, article_id, "origin",
                  None, "unknown", 0, now))
+            conn.execute(
+                "INSERT OR IGNORE INTO node_evidence(node_id,article_id,role,added_at)"
+                " VALUES(?,?,?,?)", ("n_" + event_id[2:], article_id, "primary", now))
             conn.execute("UPDATE events SET max_seq=0 WHERE event_id=?", (event_id,))
         # follow 幂等: 已有 active 不重复建
         fol = conn.execute(
@@ -395,7 +409,8 @@ def list_follows(status="active", db_path=None):
 
 
 def storyline(event_id, db_path=None, read_seq=None):
-    """故事线: 节点按 seq 升序 + 每节点带原文证据(SPEC §6 详情)。
+    """故事线: 节点按 seq 升序 + 每节点带来源证据链(SPEC §6 详情/§5第五步多来源)。
+    旧节点无 evidence 行 -> 回退主报道为唯一来源。
     read_seq>0 时标 is_unread; 关注分界 = origin 节点之后。"""
     conn = connect(db_path or DEFAULT_DB)
     try:
@@ -411,6 +426,20 @@ def storyline(event_id, db_path=None, read_seq=None):
         for r in rows:
             d = dict(r)
             d["is_unread"] = (read_seq is not None and d["seq"] > read_seq)
+            evs = conn.execute(
+                "SELECT e.role, e.article_id, a.title, a.url_original, a.url_canonical,"
+                " a.source_id, a.published_at"
+                " FROM node_evidence e JOIN articles a ON a.article_id=e.article_id"
+                " WHERE e.node_id=? ORDER BY e.role DESC, a.published_at",
+                (d["node_id"],)).fetchall()
+            if evs:
+                d["sources"] = [dict(x) for x in evs]
+            else:  # 旧节点无证据行: 主报道即唯一来源
+                d["sources"] = [{"role": "primary", "article_id": d["article_id"],
+                                 "title": d["title"], "url_original": d["url_original"],
+                                 "url_canonical": d["url_canonical"],
+                                 "source_id": d["source_id"],
+                                 "published_at": d["published_at"]}]
             out.append(d)
         return {"event": dict(ev), "nodes": out}
     finally:
@@ -434,29 +463,76 @@ def mark_read(event_id, db_path=None):
         conn.close()
 
 
-# ---------------------------------------------------------- 进展扫描(B: 规则)
-_RE_RETELL = re.compile(r"转述|报道|获悉|表示|宣布|消息人士|sources?:|according to|"
-                        r"report(ed|s)?|says?|confirmed?", re.I)
+# ---------------------------------------------------------- 进展扫描(C: 关联质量+转述合并)
+# SPEC §15-1「先修关联质量」回归样例(2026-10-17 截图实锤):
+#   - COD 新闻靠 "launch/trailer" 泛词混入 GTA6 故事线
+#   - AI 公司营收报道靠 "here/the" 英文虚词混入
+# 修法三件套: ①停用词不计分 ②DF 区分词过滤(全库标题出现率>=DF_MAX 的 token 不算区分性,
+#   数据驱动而非手写硬扛) ③转述优先: 与节点既有来源同题 -> 补来源,不加节点不加未读。
+
+_STOP_EN = {
+    "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
+    "been", "being", "have", "has", "had", "will", "would", "can", "could",
+    "may", "might", "must", "shall", "should", "its", "his", "her", "their",
+    "our", "your", "you", "they", "them", "not", "but", "about", "into",
+    "over", "after", "before", "than", "then", "when", "where", "who", "what",
+    "which", "how", "why", "here", "there", "more", "most", "some", "any",
+    "each", "every", "both", "few", "many", "much", "other", "another",
+    "such", "only", "same", "too", "very", "just", "also", "even", "still",
+    "again", "once", "said", "says", "according", "between", "during",
+    "under", "until", "while", "because", "since", "however", "these",
+    "those", "been", "does", "did", "done", "get", "got", "like", "well",
+    "back", "first", "last", "next", "new", "now", "way", "use", "out",
+    "one", "two", "three", "all", "its",
+}
+_STOP_ZH = {
+    "发布", "正式", "今天", "今日", "新款", "表示", "宣布", "市场", "用户",
+    "产品", "公司", "游戏", "玩家", "进行", "相关", "报道", "最新", "上线",
+    "更新", "推出", "亮相", "确认", "开发", "计划", "预计", "带来", "如何",
+    "还是", "已经", "开始", "视频", "图片", "时间", "问题", "可能", "需要",
+    "认为", "出现", "成为", "目前", "现在", "以及", "通过", "关于", "方面",
+    "情况", "首次", "连续", "一个", "这个", "那个", "我们", "你们", "他们",
+    "记者", "消息", "报告", "媒体", "显示", "透露", "提到", "指出", "谈到",
+}
+DF_MAX = 0.03          # 区分词门槛: 全库标题出现率 <3% 才算有区分性
+RETELL_RATIO = 0.62    # 同题阈值(复用粗筛去重的经验值)
 
 
 def _toks(text):
-    """粗分词: 英文按词,中文按二元组。够 B 阶段做候选重合度。"""
+    """分词: 英文按词(len>=3)、中文按二元组;停用词直接丢弃。"""
     text = (text or "").lower()
-    eng = set(re.findall(r"[a-z][a-z0-9]{2,}", text))
-    cjk = re.findall(r"[一-鿿]+", text)
+    eng = {w for w in re.findall(r"[a-z][a-z0-9]{2,}", text) if w not in _STOP_EN}
     big = set()
-    for seg in cjk:
+    for seg in re.findall(r"[一-鿿]+", text):
         big.update(seg[i:i + 2] for i in range(len(seg) - 1))
-    return eng | big
+    return eng | {b for b in big if b not in _STOP_ZH}
 
 
-def scan_progress(db_path=None, top_k=3, min_overlap=2):
-    """每日直接进展扫描(SPEC §5 第五步的 B 阶段规则版):
-    对每个 active 事件, 在**全量合格材料**(不截断粗筛, SPEC §5 第二步)里找
-    与事件既有报道 token 重合>=min_overlap 的新报道 -> 挂 direct 节点。
-    - 同一 (event, article) UNIQUE -> 天然幂等, 重跑不重复追加
-    - B 阶段不做归属 LLM/转述合并(那是 C), 先把"新节点进来+跨期保存"跑通
-    返回 {checked, added, per_event}。"""
+def _df_rates(titles):
+    """全库标题 token 出现率(区分性计算)。"""
+    from collections import Counter
+    cnt = Counter()
+    n = 0
+    for t in titles:
+        n += 1
+        cnt.update(_toks(t))
+    if n == 0:
+        return {}
+    return {w: c / float(n) for w, c in cnt.items()}
+
+
+def scan_progress(db_path=None, min_distinct=3):
+    """每日直接进展扫描(C 阶段: 关联质量 + 转述合并)。
+    对每个 active 事件, 在**全量合格材料**(不截断粗筛, SPEC §5 第二步):
+    1) 转述判定优先: 与节点任一既有来源标题相似度>=RETELL_RATIO -> 同节点补来源
+       (不加节点、不加未读, SPEC §5第五步"同事实转述只产生一个进展")
+    2) 关联判定: 与创始画像的交集里**区分性 token**(停用词剔除 + DF<DF_MAX)>=min_distinct
+       -> 新 direct 节点 + primary 证据。
+       ⚠️ min_distinct=3 是 944 条实测校准的: 真相关(GTA6 trailer)与画像共享 5 词,
+       混入(COD launch/trailer)只有 2 词;DF 门槛在小库规模几乎不过滤(launch=0.32%),
+       交集数量级才是当前的有效区分器。漏掉的进不了主线是安全的,错混入不是(SPEC §15-1)。
+    幂等: (event,article) 与 (node,article) 双 UNIQUE,重跑不重复追加。
+    返回 {checked, added, retold, per_event}。"""
     db_path = db_path or DEFAULT_DB
     conn = connect(db_path)
     try:
@@ -464,14 +540,20 @@ def scan_progress(db_path=None, top_k=3, min_overlap=2):
             "SELECT event_id FROM follows WHERE user_local='local' AND status='active'"
         ).fetchall()
         if not follows:
-            return {"checked": 0, "added": 0, "per_event": {}}
+            return {"checked": 0, "added": 0, "retold": 0, "per_event": {}}
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        # 事件画像 = 创始报道标题(固定画像)。⚠️ 不能用"所有节点并集":节点越多画像越大,
-        # 每轮扫描都会比上一轮多抓(实测 3->25 节点滚雪球),同输入重跑不再同输出。
-        # 判定新进展的措辞漂移是阶段C(LLM)的事,B 阶段钉死画像换幂等。
-        profiles = {}
+        # 材料 = 全库报道(合格: 有标题有链接)
+        all_arts = conn.execute(
+            "SELECT article_id, title, published_at, published_precision FROM articles"
+            " WHERE title IS NOT NULL AND title!=''").fetchall()
+        df = _df_rates([a["title"] for a in all_arts])
+        distinct = {w for w, r in df.items() if r < DF_MAX}
+
+        added = checked = retold = 0
+        per_event = {}
         for f in follows:
             eid = f["event_id"]
+            # 画像 = 创始报道标题(固定画像,防节点并集滚雪球;措辞漂移判定属后续LLM阶段)
             row = conn.execute(
                 "SELECT a.title FROM events e JOIN articles a"
                 " ON a.article_id=e.origin_article_id WHERE e.event_id=?",
@@ -482,46 +564,117 @@ def scan_progress(db_path=None, top_k=3, min_overlap=2):
                 title = ev["display_name"] if ev else ""
             else:
                 title = row["title"]
-            profiles[eid] = _toks(title)
-        # 材料 = 全库报道(合格: 有标题有链接)
-        all_arts = conn.execute(
-            "SELECT article_id, title, published_at, published_precision FROM articles"
-            " WHERE title IS NOT NULL AND title!=''").fetchall()
-        added = checked = 0
-        per_event = {}
-        for eid, prof in profiles.items():
+            prof = _toks(title) & distinct
             if not prof:
+                per_event[eid] = 0
                 continue
-            have = {r["article_id"] for r in conn.execute(
-                "SELECT article_id FROM nodes WHERE event_id=?", (eid,)).fetchall()}
+            # 事件已有证据(节点主报道 + 全部证据来源)的标题清单 -> 转述比对用
+            have = set()
+            ev_rows = conn.execute(
+                "SELECT n.node_id, n.article_id, a.title FROM nodes n"
+                " JOIN articles a ON a.article_id=n.article_id"
+                " WHERE n.event_id=?", (eid,)).fetchall()
+            src_titles = []
+            node_of_article = {}
+            for r in ev_rows:
+                # 存量迁移: B阶段旧节点无 evidence 行 -> 补 primary(幂等, SPEC §4 证据必存)
+                conn.execute(
+                    "INSERT OR IGNORE INTO node_evidence(node_id,article_id,role,added_at)"
+                    " VALUES(?,?,?,?)", (r["node_id"], r["article_id"], "primary", now))
+                have.add(r["article_id"])
+                src_titles.append((r["node_id"], r["title"]))
+                node_of_article[r["article_id"]] = r["node_id"]
+            ev2 = conn.execute(
+                "SELECT e.node_id, e.article_id, a.title FROM node_evidence e"
+                " JOIN articles a ON a.article_id=e.article_id"
+                " JOIN nodes n ON n.node_id=e.node_id WHERE n.event_id=?",
+                (eid,)).fetchall()
+            for r in ev2:
+                have.add(r["article_id"])
+                src_titles.append((r["node_id"], r["title"]))
+
             seq = conn.execute("SELECT max_seq FROM events WHERE event_id=?",
                                (eid,)).fetchone()["max_seq"]
-            n_add = 0
+            n_add = n_retell = 0
             for a in all_arts:
                 checked += 1
                 if a["article_id"] in have:
                     continue
-                ov = len(_toks(a["title"]) & prof)
-                if ov < min_overlap:
+                # 1) 转述判定: 同题 -> 挂到最相似节点的证据链
+                best_nid, best_r = None, 0.0
+                at = _toks(a["title"])
+                for nid, t in src_titles:
+                    r = difflib.SequenceMatcher(None, a["title"] or "", t or "").ratio()
+                    if r > best_r:
+                        best_nid, best_r = nid, r
+                if best_nid is not None and best_r >= RETELL_RATIO:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO node_evidence(node_id,article_id,role,"
+                        "added_at) VALUES(?,?,?,?)",
+                        (best_nid, a["article_id"], "support", now))
+                    have.add(a["article_id"])
+                    src_titles.append((best_nid, a["title"]))
+                    n_retell += 1
+                    retold += 1
+                    continue
+                # 2) 关联判定: 区分性 token 交集
+                ov = len(at & prof)
+                if ov < min_distinct:
                     continue
                 seq += 1
+                nid = "n_%s_%s" % (eid[2:], a["article_id"][2:])
                 conn.execute(
                     "INSERT OR IGNORE INTO nodes(node_id,event_id,article_id,node_type,"
                     "occurred_at,occurred_precision,seq,match_score,created_at)"
                     " VALUES(?,?,?,?,?,?,?,?,?)",
-                    ("n_%s_%s" % (eid[2:], a["article_id"][2:]), eid, a["article_id"],
-                     "direct", a["published_at"],
+                    (nid, eid, a["article_id"], "direct", a["published_at"],
                      a["published_precision"] or "minute", seq, float(ov), now))
+                conn.execute(
+                    "INSERT OR IGNORE INTO node_evidence(node_id,article_id,role,"
+                    "added_at) VALUES(?,?,?,?)", (nid, a["article_id"], "primary", now))
                 n_add += 1
                 have.add(a["article_id"])
+                src_titles.append((nid, a["title"]))
                 added += 1
             if n_add:
                 conn.execute(
                     "UPDATE events SET max_seq=?, last_node_at=? WHERE event_id=?",
                     (seq, now, eid))
-            per_event[eid] = n_add
+            per_event[eid] = {"added": n_add, "retold": n_retell}
         conn.commit()
-        return {"checked": checked, "added": added, "per_event": per_event}
+        return {"checked": checked, "added": added, "retold": retold,
+                "per_event": per_event}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def remove_node(event_id, node_id, db_path=None):
+    """最小人工纠错(SPEC §8 移出错误节点): 删除节点与其证据,seq 压缩重排,
+    重算水位。保留其他节点身份不变。"""
+    conn = connect(db_path or DEFAULT_DB)
+    try:
+        n = conn.execute("SELECT event_id FROM nodes WHERE node_id=?",
+                         (node_id,)).fetchone()
+        if n is None or n["event_id"] != event_id:
+            return {"error": "节点不存在或不属于该事件"}
+        conn.execute("DELETE FROM nodes WHERE node_id=?", (node_id,))
+        conn.execute("DELETE FROM node_evidence WHERE node_id=?", (node_id,))
+        rows = conn.execute(
+            "SELECT node_id FROM nodes WHERE event_id=? ORDER BY seq",
+            (event_id,)).fetchall()
+        for i, r in enumerate(rows):
+            conn.execute("UPDATE nodes SET seq=? WHERE node_id=?", (i, r["node_id"]))
+        max_seq = len(rows) - 1 if rows else -1
+        conn.execute("UPDATE events SET max_seq=? WHERE event_id=?", (max_seq, event_id))
+        # 已读位置不超过新水位
+        conn.execute(
+            "UPDATE follows SET last_read_seq=MIN(last_read_seq,?)"
+            " WHERE user_local='local' AND event_id=?", (max_seq, event_id))
+        conn.commit()
+        return {"event_id": event_id, "node_id": node_id, "max_seq": max_seq}
     except Exception:
         conn.rollback()
         raise

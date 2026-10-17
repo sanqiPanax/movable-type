@@ -99,6 +99,12 @@ h1{font-size:30px;letter-spacing:.24em;margin:0 0 4px}
 .tl .ttitle a{color:var(--ink);text-decoration:none}
 .tl .ttitle a:hover{color:var(--seal)}
 .tl .tmeta{font-size:11px;color:var(--muted)}
+.tl details.srcs{margin:4px 0 0;font-size:11.5px}
+.tl details.srcs summary{color:var(--seal);cursor:pointer;letter-spacing:.08em}
+.tl details.srcs .srcrow{padding:3px 0 2px 12px;border-left:1px dotted var(--hair);margin:3px 0}
+.tl details.srcs .srcrow a{color:var(--ink);text-decoration:none}
+.tl details.srcs .srcrow a:hover{color:var(--seal)}
+.tl details.srcs .sm{color:var(--muted);font-size:10.5px}
 .tl li.unread .ttitle a{color:var(--seal)}
 .tl li.boundary-li{border-left-color:transparent;padding-bottom:10px}
 .tl li.boundary-li::before{display:none}
@@ -219,13 +225,28 @@ def storyline_html(event_id):
         btxt = ("未读" if n.get("is_unread")
                 else ("创始报道" if n.get("node_type") == "origin" else "进展"))
         bcls = "unread" if n.get("is_unread") else ""
+        # 来源证据链(C: 转述合并 -> 同一节点多来源, 可展开逐条溯源 SPEC §5第五步)
+        srcs = n.get("sources") or []
+        if len(srcs) > 1:
+            rows_s = "".join(
+                "<div class='srcrow'><a href='%s' target='_blank' rel='noopener'>%s</a>"
+                " <span class='sm'>%s · %s</span></div>"
+                % (esc(s.get("url_canonical") or s.get("url_original") or "#"),
+                   esc((s.get("title") or "")[:80]), esc(s.get("source_id")),
+                   esc((s.get("published_at") or "")[:16]).replace("T", " "))
+                for s in srcs)
+            srchtml = ("<details class='srcs'><summary>来源 %d 篇(转述已合并,"
+                       "展开逐条溯源)</summary>%s</details>"
+                       % (len(srcs), rows_s))
+        else:
+            srchtml = ""
         items.append(
             "<li class='%s'><div class='tdate'>%s <span class='badge %s'>%s</span></div>"
             "<div class='ttitle'><a href='%s' target='_blank' rel='noopener'>%s</a></div>"
-            "<div class='tmeta'>来源 %s · 发表 %s · 收录于 %s</div></li>"
+            "<div class='tmeta'>来源 %s · 发表 %s · 收录于 %s</div>%s</li>"
             % (" ".join(cls), tshow, bcls, btxt, esc(url), esc(n.get("title")),
                esc(n.get("source_id")), esc((n.get("published_at") or "")[:16]).replace("T", " "),
-               esc((n.get("created_at") or "")[:16]).replace("T", " ")))
+               esc((n.get("created_at") or "")[:16]).replace("T", " "), srchtml))
 
     if is_arch:
         btns = ("<div class='btns'><span class='msg'>已归档事件为只读快照;"
