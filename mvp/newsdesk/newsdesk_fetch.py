@@ -125,6 +125,25 @@ SOURCES = [
     {"id": "steam_news", "name": "Steam 官方新闻", "kind": "rss",
      "url": "https://store.steampowered.com/feeds/news.xml", "route": "direct",
      "group": "游戏", "ttl": 3600},
+    # ---- 金融 / 政治(2026-10-17 为多版报纸接入;Google News 聚合,路由同上)----
+    {"id": "gnews_fin", "name": "Google News · 金融", "kind": "rss",
+     "url": ("https://news.google.com/rss/search?q=stocks+OR+economy"
+             "+OR+central+bank+OR+earnings&hl=en-US&gl=US&ceid=US:en"),
+     "route": "proxy", "group": "金融", "ttl": 900},
+    {"id": "gnews_fin_cn", "name": "Google News · 金融(中文)", "kind": "rss",
+     "url": ("https://news.google.com/rss/search?q=%E8%82%A1%E5%B8%82"
+             "+OR+%E5%A4%AE%E8%A1%8C+OR+%E7%BB%8F%E6%B5%8E"
+             "&hl=zh-CN&gl=CN&ceid=CN:zh"), "route": "proxy",
+     "group": "金融", "ttl": 900},
+    {"id": "gnews_pol", "name": "Google News · 政治", "kind": "rss",
+     "url": ("https://news.google.com/rss/search?q=politics+OR+election"
+             "+OR+government+OR+congress&hl=en-US&gl=US&ceid=US:en"),
+     "route": "proxy", "group": "政治", "ttl": 900},
+    {"id": "gnews_pol_cn", "name": "Google News · 政治(中文)", "kind": "rss",
+     "url": ("https://news.google.com/rss/search?q=%E9%80%89%E4%B8%BE"
+             "+OR+%E6%94%BF%E7%AD%96+OR+%E5%A4%94%E4%BA%A4"
+             "&hl=zh-CN&gl=CN&ceid=CN:zh"), "route": "proxy",
+     "group": "政治", "ttl": 900},
 ]
 
 # ---- X / Twitter(2026-09-21 接入;走 twitter-cli 登录态 cookie,见 newsdesk_x.py)----

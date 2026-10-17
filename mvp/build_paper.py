@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """魔法日报 MVP · movable-type
 流程: data/latest.json -> 六维打分 -> 规则粗筛 -> LLM 主编(DeepSeek,失败自动回退规则排版)
-      -> og:image 配图(失败退无图版面) -> 单文件 HTML (out/index.html)
+      -> og:image 配图(失败退无图版面) -> 多版单文件 HTML (out/index.html)
+
+版面结构(v2, 2026-10-17): 第一版头版=各版最重要新闻摘要; 之后每版一个板块
+(科技[软件/硬件] / 游戏 / 金融 / 政治 / 生活), 翻版动画=行级飞散(0.8~1.1s)。
 
 红线: AI 只选排不改写; 版面新闻文字一律原文切片; 编辑手记/弃稿理由是元信息,不陈述新闻事实。
 用法: python -X utf8 build_paper.py [--no-llm] [--fetch]
@@ -26,12 +29,11 @@ OUT_DIR = os.path.join(HERE, "out")
 IMG_DIR = os.path.join(OUT_DIR, "img")
 CRED_FILE = r"C:\Users\Lenovo\.dsh\.credentials.yaml"
 NEWDESK_DIR = os.path.join(HERE, "newsdesk")
+PROMPT_VER = "v2pages"          # 提示词版本, 进决策缓存签名, 改提示词自动失效
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 PROXIES = ["http://127.0.0.1:7897"]
-MAX_PROBE = 10          # 最多探测配图的选中条目数
-WANT_IMG = 6
 MIN_W = 520
 BAD_IMG = ("logo", "placeholder", "default", "avatar", "favicon", "1x1", "spacer")
 RE_IMG = [
@@ -42,13 +44,23 @@ RE_IMG = [
 LAZY_ATTRS = ("data-original", "data-src", "data-lazy-src", "data-echo",
               "data-actualsrc", "data-lazyload")
 
-SECTIONS = [  # (key, 中文名, 拉丁副名, 观察员署名)
-    ("top",   "要闻纵览", "IN BRIEF",        "本报时政观察员"),
-    ("tech",  "科技 · 前沿", "TECH FRONTLINE", "本报科技观察员"),
-    ("life",  "生活 · 观察", "LIVING & SOCIETY", "本报生活观察员"),
-    ("game",  "游戏 · 战报", "GAME DESK",      "本报游戏观察员"),
+# (key, 版名, 拉丁副名, 观察员署名) —— 渲染顺序即版次顺序(头版永远第一)
+SECTIONS = [
+    ("tech", "科技", "TECHNOLOGY", "本报科技观察员"),
+    ("game", "游戏", "GAME DESK", "本报游戏观察员"),
+    ("fin",  "金融", "FINANCE",    "本报财经观察员"),
+    ("pol",  "政治", "POLITICS",   "本报时政观察员"),
+    ("life", "生活", "LIVING",     "本报生活观察员"),
 ]
-GROUP_FALLBACK = {"科技": "tech", "聚合": "tech", "游戏": "game", "中文": "life", "社区": "life"}
+SEC_CAP = {"tech": 8, "game": 6, "fin": 6, "pol": 6, "life": 5}
+NAME2KEY = {"科技": "tech", "游戏": "game", "金融": "fin", "政治": "pol", "生活": "life"}
+GROUP2KEY = {"科技": "tech", "聚合": "tech", "项目": "tech", "社区": "tech",
+             "中文": "tech", "游戏": "game", "金融": "fin", "政治": "pol"}
+HARDWARE_RE = re.compile(
+    r"chip|semiconductor|gpu|cpu|\bsoc\b|smartphone|\bphone\b|laptop|\bpc\b|"
+    r"console|hardware|monitor|camera|chipset|ssd|memory|server|drone|robot|"
+    r"芯片|显卡|处理器|手机|笔记本|电脑|主板|显示器|相机|固态|内存|服务器|机器人", re.I)
+CN_NUM = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -79,6 +91,11 @@ def deepseek_key():
         return None
     m = re.search(r"DEEPSEEK_API_KEY:\s*(\S+)", txt)
     return m.group(1) if m else None
+
+
+def tech_sub(it):
+    hay = (it.get("title") or "") + " " + (it.get("desc") or "")
+    return "硬件" if HARDWARE_RE.search(hay) else "软件"
 
 
 # ---------------------------------------------------------------- 粗筛
@@ -117,20 +134,23 @@ def cands_payload(cands):
 # ---------------------------------------------------------------- AI 主编
 EDITOR_SYS = """你是《活字新报》的主编。你只做两件事:选择与编排。绝不改写、翻译、补写任何标题或摘要,版面文字全部来自给定原文。
 输出必须是一个 JSON 对象,不要输出任何其他文字。"""
-EDITOR_TPL = """版面容量:头版 1 条(最有分量且信息实质最足);要闻纵览 4 条;科技 3 条;生活 3 条;游戏 3 条(各栏可±1,总数 10~14)。
+EDITOR_TPL = """本期为多版报纸。版面结构与容量:
+- 头版:各版最重要新闻的摘要页。lead_id = 全期最重要的一条(通常就是某版的第一条)。
+- 科技版 6~8 条:每块必须给 sub("软件"|"硬件")——芯片/手机/PC/相机/服务器等实体设备与半导体→"硬件";AI/应用/编程/互联网/安全/云服务→"软件"。
+- 游戏版 4~5 条;金融版 4~5 条;政治版 4~5 条;生活版 3~4 条。总数 20~25。
+- 每版内部按重要度降序;每版第一条 = 本版头条(会出现在头版摘要卡)。
 
 选稿规则:
-1. 头版优先给「摘要实质丰富(dl 大)、信源权威(sc 高)、影响面大」的条目;标题党/摘要只等于标题的条目不上头版。
-2. 同题重复只上一条。
-3. 英文条目照原文保留,不翻译。
-4. 未上版条目不必都给理由;从落选池挑最多 5 条你认为读者会问「为什么没上」的,各写一句中文理由(只讲取舍,不重复新闻事实)。
-5. editor_note 一句话讲本期取舍思路(<=50字,中文,不得陈述新闻事实)。
+1. 归版按条目内容判断,g(来源分组)仅供参考:消费电子/芯片/PC→科技-硬件;AI/软件/互联网→科技-软件;游戏→游戏;股市/财报/经济/央行政策→金融;选举/法案/外交/政府→政治;社会/消费/健康/其余→生活。
+2. 同题重复只上一条;英文条目照原文保留,不翻译;标题党/摘要只等于标题的不上每版头条。
+3. dropped:从落选池挑最多 6 条读者会问「为什么没上」的,各写一句中文理由(只讲取舍,不重复新闻事实)。
+4. editor_note 一句话讲本期取舍思路(<=50字,中文,不得陈述新闻事实)。
 
-候选条目(字段:i 唯一id / t 标题 / d 摘要 / dl 摘要长度 / s 来源 / g 分类 / sc 评分):
+候选条目(字段:i 唯一id / t 标题 / d 摘要 / dl 摘要长度 / s 来源 / g 分组 / sc 评分):
 __CANDS__
 
-输出 JSON 结构(sections 的 name 只能取:要闻/科技/生活/游戏;头版单独给 lead_id):
-{{"lead_id":"iN","sections":[{{"name":"要闻","blocks":[{{"item_id":"iN","weight":"feature"}}]}}],"dropped":[{{"item_id":"iN","reason":"一句话理由"}}],"editor_note":"一句话"}}"""
+输出 JSON 结构(name 只能取:科技/游戏/金融/政治/生活;科技块 sub 必填;其余版不要 sub):
+{{"lead_id":"iN","sections":[{{"name":"科技","blocks":[{{"item_id":"iN","weight":"feature","sub":"软件"}}]}}],"dropped":[{{"item_id":"iN","reason":"一句话理由"}}],"editor_note":"一句话"}}"""
 
 
 def llm_edit(cands):
@@ -139,29 +159,23 @@ def llm_edit(cands):
         log("无 DeepSeek key,回退规则排版")
         return None
     payload = json.dumps(cands_payload(cands), ensure_ascii=False)
-    body = {
-        "model": os.environ.get("MT_DEEPSEEK_MODEL", "deepseek-chat"),
-        "temperature": 0.2,
-        "max_tokens": 4096,
-        "messages": [
-            {"role": "system", "content": EDITOR_SYS},
-            {"role": "user", "content": EDITOR_TPL.replace("__CANDS__", payload)},
-        ],
-    }
-    req = urllib.request.Request(
-        "https://api.deepseek.com/chat/completions",
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json",
-                 "Authorization": "Bearer " + key})
-    for attempt, mt in enumerate((4096, 8192)):
+    for attempt in range(2):
+        body = {
+            "model": os.environ.get("MT_DEEPSEEK_MODEL", "deepseek-chat"),
+            "temperature": 0.2,
+            "max_tokens": 8192,   # deepseek-flash 是推理模型,输出长必须给足
+            "messages": [
+                {"role": "system", "content": EDITOR_SYS},
+                {"role": "user", "content": EDITOR_TPL.replace("__CANDS__", payload)},
+            ],
+        }
+        req = urllib.request.Request(
+            "https://api.deepseek.com/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Authorization": "Bearer " + key})
         try:
-            body["max_tokens"] = mt
-            req = urllib.request.Request(
-                "https://api.deepseek.com/chat/completions",
-                data=json.dumps(body).encode("utf-8"),
-                headers={"Content-Type": "application/json",
-                         "Authorization": "Bearer " + key})
-            with opener().open(req, timeout=120) as r:
+            with opener().open(req, timeout=150) as r:
                 resp = json.loads(r.read().decode("utf-8"))
             content = (resp.get("choices") or [{}])[0].get("message", {}).get("content") or ""
             if not content.strip():
@@ -177,54 +191,71 @@ def llm_edit(cands):
 
 
 def rule_edit(cands):
-    """回退:第一条当头版,其余按分栏回填。"""
-    name2key = {"要闻": "top", "科技": "tech", "生活": "life", "游戏": "game"}
-    dec = {"lead_id": "i0", "sections": [], "dropped": [], "editor_note": "规则排版(未接主编):按评分顺排。"}
+    """回退:按分组归版,评分顺排,第一条当 lead。"""
+    dec = {"lead_id": "i0", "sections": [], "dropped": [],
+           "editor_note": "规则排版(未接主编):按评分与分组顺排。"}
     used = {"i0"}
     for k, it in enumerate(cands[1:], 1):
-        if len(used) >= 13:
+        if len(used) >= 23:
             dec["dropped"].append({"item_id": "i%d" % k, "reason": "版面已满"})
             continue
-        key = GROUP_FALLBACK.get(it.get("group"), "top")
-        name = next(n for n, kk in name2key.items() if kk == key)
+        key = GROUP2KEY.get(it.get("group"), "life")
+        name = next(n for n, kk in NAME2KEY.items() if kk == key)
         sec = next((s for s in dec["sections"] if s["name"] == name), None)
         if sec is None:
             sec = {"name": name, "blocks": []}
             dec["sections"].append(sec)
-        sec["blocks"].append({"item_id": "i%d" % k, "weight": "brief"})
+        block = {"item_id": "i%d" % k, "weight": "brief"}
+        if key == "tech":
+            block["sub"] = tech_sub(it)
+        sec["blocks"].append(block)
         used.add("i%d" % k)
     return dec
 
 
 def normalize_decision(dec, cands):
-    """校验 id/容量;非法则抛错回退。返回 {lead, cols{key:[(item,weight)]}, dropped, note}"""
+    """校验 id/容量;非法抛错回退。
+    返回 {lead, cols{key:[(iid,weight,sub)]}, by_id, dropped, note}"""
     ids = {"i%d" % k for k in range(len(cands))}
     by_id = {"i%d" % k: (cands[k], it) for k, it in enumerate(cands)}
     lid = dec.get("lead_id")
     if lid not in ids:
         raise ValueError("lead_id 非法")
-    used = {lid}
+    used = set()          # lead 不占版面名额:头版头条通常同时是某版头条
     cols = {k: [] for k, _, _, _ in SECTIONS}
-    name2key = {"要闻": "top", "科技": "tech", "生活": "life", "游戏": "game"}
     for sec in dec.get("sections") or []:
-        key = name2key.get(sec.get("name"))
+        key = NAME2KEY.get(sec.get("name"))
         if key is None:
             continue
-        for b in (sec.get("blocks") or [])[:5]:
+        for b in (sec.get("blocks") or [])[:SEC_CAP[key]]:
             iid = b.get("item_id")
-            if iid in ids and iid not in used and len(cols[key]) < 5:
-                cols[key].append((iid, b.get("weight") or "brief"))
+            if iid in ids and iid not in used and len(cols[key]) < SEC_CAP[key]:
+                sub = b.get("sub") if key == "tech" else None
+                if key == "tech" and sub not in ("软件", "硬件"):
+                    sub = tech_sub(by_id[iid][1])
+                cols[key].append((iid, b.get("weight") or "brief", sub))
                 used.add(iid)
     dropped = []
     for d in (dec.get("dropped") or [])[:8]:
-        if d.get("item_id") in ids and d.get("item_id") not in used and d.get("reason"):
+        if d.get("item_id") in ids and d.get("item_id") not in used \
+           and d.get("item_id") != lid and d.get("reason"):
             dropped.append(d)
-    # 空栏回填:按分数补
-    rest = ["i%d" % k for k in range(len(cands)) if "i%d" % k not in used]
-    for k in cols:
-        while len(cols[k]) < 2 and rest:
-            cols[k].append((rest.pop(0), "brief"))
-    return {"lead": by_id[lid], "cols": cols, "by_id": by_id,
+    # 空版回填:优先同分组,其次按分;每版至少 2 条(池子不够就尽力)
+    rest = sorted((k for k in by_id if k not in used and k != lid),
+                  key=lambda x: -by_id[x][0].get("sc", 0))
+    for key in cols:
+        if cols[key]:
+            continue
+        name = next(n for n, kk in NAME2KEY.items() if kk == key)
+        same = [x for x in rest
+                if GROUP2KEY.get(by_id[x][1].get("group"), "life") == key]
+        fill = (same + [x for x in rest if x not in same])[:3]
+        for iid in fill:
+            it = by_id[iid][1]
+            sub = tech_sub(it) if key == "tech" else None
+            cols[key].append((iid, "brief", sub))
+            rest.remove(iid)
+    return {"lead": by_id[lid], "lead_id": lid, "cols": cols, "by_id": by_id,
             "dropped": dropped, "note": (dec.get("editor_note") or "").strip()[:80]}
 
 
@@ -274,7 +305,6 @@ def find_image(page_url):
             if u:
                 return u, data
 
-    # 兜底:正文里最大的 <img>(懒加载属性优先)
     cands = []
     for tag in re.findall(r"<img[^>]*>", txt, re.I)[:120]:
         u = None
@@ -309,31 +339,37 @@ def find_image(page_url):
 
 
 def fetch_images(plan_items):
-    """plan_items: [(slot_name, [item...])] 每栏给候选序列,优先非 Google News 的。
-    返回 {slot: (fname, credit_host)}"""
+    """plan_items: [(slot_name, [item...])] 每槽给候选序列,优先非 Google News。
+    同 URL 只抓一次,多槽共享结果。返回 {slot: (fname, credit_host)}"""
     os.makedirs(IMG_DIR, exist_ok=True)
-    probe = []
+    probe, seen_url, results = {}, {}, {}
     for slot, pool in plan_items:
         for it in pool[:3]:
             url = it.get("url") or ""
             if url and "news.google.com" not in url:
-                probe.append((slot, it, url))
+                if url in seen_url:            # 同图复用,不重复下载
+                    results[slot] = seen_url[url]
+                else:
+                    probe[slot] = url
+                    seen_url[url] = None       # 占位,完成后回填
                 break
-    results = {}
 
     def work(job):
-        slot, it, url = job
+        slot, url = job
         u, data = find_image(url)
         if not data:
             return None
         name = "p_%s.jpg" % re.sub(r"\W+", "", slot)
         open(os.path.join(IMG_DIR, name), "wb").write(data)
-        return slot, (name, urllib.parse.urlparse(u).netloc.replace("www.", ""))
+        return slot, url, (name, urllib.parse.urlparse(u).netloc.replace("www.", ""))
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        for r in ex.map(work, probe):
-            if r:
-                results[r[0]] = r[1]
+    if probe:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            for r in ex.map(work, probe.items()):
+                if r:
+                    slot, url, res = r
+                    results[slot] = res
+                    seen_url[url] = res
     return results
 
 
@@ -361,7 +397,7 @@ CSS = """
 html,body{margin:0;padding:0}
 body{background:var(--bg);color:var(--ink);
   font-family:"Songti SC","SimSun","Noto Serif CJK SC",Georgia,serif;-webkit-font-smoothing:antialiased}
-.stage{display:flex;justify-content:center;padding:26px 16px 90px}
+.stage{display:flex;justify-content:center;padding:26px 16px 96px}
 .sheet{width:1500px;max-width:100%;background:var(--paper);padding:30px 40px 24px;position:relative;
   box-shadow:0 22px 64px rgba(0,0,0,.45)}
 .sheet::after{content:"";position:absolute;inset:0;pointer-events:none;opacity:.35;mix-blend-mode:multiply;
@@ -386,17 +422,33 @@ body{background:var(--bg);color:var(--ink);
 .alive-text .ticker .track{animation:roll 60s linear infinite}
 @keyframes roll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
 .ticker .tk::after{content:"　◆　";color:var(--seal)}
-nav.sections{display:flex;justify-content:center;gap:34px;font-size:12px;letter-spacing:.2em;
+nav.tabs{display:flex;justify-content:center;gap:30px;font-size:12px;letter-spacing:.2em;
   border-bottom:1px solid var(--rule);padding:7px 0}
-nav.sections a{color:var(--ink);text-decoration:none}
-nav.sections a:hover{color:var(--seal)}
-nav.sections span{color:var(--muted);font-size:9.5px;letter-spacing:.14em;margin-left:5px}
+nav.tabs button{font:inherit;background:none;border:0;color:var(--ink);letter-spacing:.2em;cursor:pointer;
+  padding:2px 4px;font-family:inherit}
+nav.tabs button:hover{color:var(--seal)}
+nav.tabs button.on{color:var(--seal);border-bottom:2px solid var(--seal);font-weight:700}
+nav.tabs span{color:var(--muted);font-size:9.5px;letter-spacing:.14em;margin-left:5px}
+/* ---------- 多版容器 ---------- */
+.pages{position:relative}
+.page{display:none}
+.page.active{display:block}
+.pagefolio{display:flex;justify-content:space-between;font-size:11px;letter-spacing:.26em;color:#4c432f;
+  border-bottom:1px solid var(--rule);padding:7px 2px;margin-top:16px}
+.pagefolio b{color:var(--seal);font-weight:700}
+/* ---------- 翻版:行级飞散 ---------- */
+.page.pg-out .blk{animation:pgOut .4s cubic-bezier(.5,0,.85,.4) both;
+  animation-delay:calc(var(--i,0)*24ms)}
+.page.pg-in .blk{animation:pgIn .46s cubic-bezier(.15,.75,.25,1) both;
+  animation-delay:calc(var(--i,0)*30ms)}
+@keyframes pgOut{to{transform:translate3d(-46px,14px,0) rotate(-1.6deg);opacity:0}}
+@keyframes pgIn{from{transform:translate3d(66px,-18px,0) rotate(2.2deg);opacity:0}
+  to{transform:none;opacity:1}}
 /* ---------- 版面 ---------- */
 .grid{display:grid;grid-template-columns:repeat(12,1fr)}
 .lead{grid-column:span 8;padding:16px 30px 0 0;border-right:1px solid var(--hair)}
 .side{grid-column:span 4;padding:16px 0 0 30px}
 .kicker{font-size:11px;letter-spacing:.3em;color:var(--seal);margin-bottom:7px}
-.kicker .ent{color:#4c432f}
 .headline{font-size:40px;line-height:1.24;margin:0 0 10px;font-weight:700}
 .headline .tail{font-weight:400;color:#38301f}
 .standfirst{font-family:"Kaiti SC","KaiTi","楷体",serif;font-size:16px;line-height:1.7;color:#3d3423;
@@ -409,6 +461,7 @@ nav.sections span{color:var(--muted);font-size:9.5px;letter-spacing:.14em;margin
 .alive-img .figwrap img{animation:kb 26s ease-in-out infinite alternate}
 @keyframes kb{from{transform:scale(1.03)}to{transform:scale(1.19) translate3d(-2.5%,-1.8%,0)}}
 .fig-hero{height:330px;margin-right:-24px;box-shadow:6px 8px 0 rgba(36,30,22,.15)}
+.fig-sec{height:300px;box-shadow:6px 8px 0 rgba(36,30,22,.15)}
 .fig-small{height:128px}
 .figcap{font-size:10.5px;color:var(--muted);margin:6px 0 14px;padding-bottom:10px;border-bottom:1px solid var(--hair)}
 .figcap .figno{color:var(--seal);letter-spacing:.14em;margin-right:6px}
@@ -418,20 +471,25 @@ nav.sections span{color:var(--muted);font-size:9.5px;letter-spacing:.14em;margin
 .pullquote{font-family:"Kaiti SC","KaiTi","楷体",serif;font-style:italic;font-size:17px;line-height:1.65;
   color:#33291a;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);
   padding:10px 4px;margin:14px 0;column-span:all;text-align:center}
-.side h3,.col .head{margin:0}
-.side h3{font-size:13px;letter-spacing:.3em;margin-bottom:12px;border-bottom:3px double var(--rule);padding-bottom:7px}
-.side h3 span,.col .head span{color:var(--muted);font-size:9.5px;letter-spacing:.16em;margin-left:8px}
+.side h3{font-size:13px;letter-spacing:.3em;margin:0 0 12px;border-bottom:3px double var(--rule);padding-bottom:7px}
+.side h3 span{color:var(--muted);font-size:9.5px;letter-spacing:.16em;margin-left:8px}
 .brief{border-bottom:1px solid var(--hair);padding:9px 0;break-inside:avoid}
 .brief h4{margin:0 0 4px;font-size:15px;line-height:1.45;font-weight:600}
 .brief .meta{font-size:10.5px;color:var(--muted);letter-spacing:.06em}
 .brief .meta a{color:var(--seal);text-decoration:none}
 .tag{display:inline-block;font-size:9.5px;color:var(--paper);background:#4c432f;padding:1px 6px;
   letter-spacing:.1em;margin-right:6px;vertical-align:1px}
-.row3{grid-column:span 12;border-top:3px double var(--rule);margin-top:22px;display:grid;grid-template-columns:repeat(3,1fr)}
-.col{padding:14px 22px 0;border-left:1px solid var(--hair)}
-.col:first-child{border-left:0;padding-left:0}
-.col:last-child{padding-right:0}
-.col .head{font-size:12px;letter-spacing:.24em;margin-bottom:10px;color:#33291a}
+.tag.sub{background:var(--seal)}
+.digestcard{border:1px solid var(--hair);background:rgba(255,252,240,.45);padding:10px 12px;margin-bottom:10px}
+.digestcard .dsec{font-size:10px;letter-spacing:.3em;color:var(--seal);margin-bottom:5px}
+.digestcard h4{margin:0 0 5px;font-size:14.5px;line-height:1.5;font-weight:600}
+.digestcard .meta{font-size:10px;color:var(--muted)}
+.digestcard .meta a{color:var(--seal);text-decoration:none}
+.digestcard .same{color:var(--seal);font-size:10px;letter-spacing:.1em}
+/* ---------- 内版 ---------- */
+.sec-feature{padding-top:16px}
+.sec-briefs{columns:2;column-gap:30px;margin-top:6px}
+.sec-briefs .brief{break-inside:avoid}
 /* ---------- 主编手记 ---------- */
 .handnote{grid-column:span 12;margin-top:22px;border:1px solid var(--rule);background:rgba(255,252,240,.5);
   padding:12px 16px;display:grid;grid-template-columns:2fr 1fr;gap:18px}
@@ -440,14 +498,17 @@ nav.sections span{color:var(--muted);font-size:9.5px;letter-spacing:.14em;margin
 .handnote .drops{font-size:11.5px;color:#4c432f;line-height:1.7}
 .handnote .drops li{margin-bottom:3px}
 .handnote .drops b{color:var(--seal);font-weight:600}
-footer{grid-column:span 12;margin-top:18px;border-top:1px solid var(--rule);padding-top:8px;
+footer{margin-top:18px;border-top:1px solid var(--rule);padding-top:8px;
   display:flex;justify-content:space-between;font-size:11px;color:var(--muted);letter-spacing:.1em}
-/* ---------- 动效层 ---------- */
-.alive-text .ink{clip-path:inset(0 100% -8% 0);animation:ink .8s cubic-bezier(.22,.9,.2,1) both;animation-delay:var(--d,0ms)}
-@keyframes ink{to{clip-path:inset(0 -3% -8% 0)}}
-.caret{display:inline-block;width:2px;height:.92em;background:var(--seal);vertical-align:-.08em;margin-left:2px;opacity:0}
-.typing .caret{opacity:1;animation:blink .7s steps(1) infinite}
-@keyframes blink{50%{opacity:0}}
+/* ---------- 翻版控件 ---------- */
+.pager{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:99;display:flex;gap:14px;
+  align-items:center;background:rgba(22,18,12,.93);color:#f2e9d4;border-radius:12px;padding:10px 16px;
+  font-family:system-ui,"Microsoft YaHei",sans-serif;font-size:13px;box-shadow:0 12px 34px rgba(0,0,0,.45)}
+.pager button{font:inherit;background:#e0a94a;color:#1a1610;border:0;border-radius:7px;padding:6px 13px;
+  cursor:pointer}
+.pager button:disabled{opacity:.35;cursor:default}
+.pager .pinfo{min-width:150px;text-align:center;letter-spacing:.12em}
+.pager .pinfo b{color:#e0a94a}
 .controls{position:fixed;right:20px;bottom:20px;z-index:99;display:flex;gap:15px;align-items:center;
   background:rgba(22,18,12,.93);color:#f2e9d4;border-radius:12px;padding:11px 15px;
   font-family:system-ui,"Microsoft YaHei",sans-serif;font-size:13px;box-shadow:0 12px 34px rgba(0,0,0,.45)}
@@ -455,38 +516,43 @@ footer{grid-column:span 12;margin-top:18px;border-top:1px solid var(--rule);padd
 .controls input{accent-color:#e0a94a;cursor:pointer}
 .controls button{font:inherit;background:#e0a94a;color:#1a1610;border:0;border-radius:7px;padding:5px 11px;cursor:pointer}
 .controls .sep{width:1px;height:22px;background:rgba(255,255,255,.2)}
+/* ---------- 动效层 ---------- */
+.alive-text .ink{clip-path:inset(0 100% -8% 0);animation:ink .8s cubic-bezier(.22,.9,.2,1) both;animation-delay:var(--d,0ms)}
+@keyframes ink{to{clip-path:inset(0 -3% -8% 0)}}
+.caret{display:inline-block;width:2px;height:.92em;background:var(--seal);vertical-align:-.08em;margin-left:2px;opacity:0}
+.typing .caret{opacity:1;animation:blink .7s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
 @media (prefers-reduced-motion: reduce){
   .alive-text .ink{animation:none;clip-path:none}
   .alive-img .figwrap img{animation:none}
   .alive-text .ticker .track{animation:none}
+  .page.pg-out .blk,.page.pg-in .blk{animation:none}
 }
 @media (max-width:820px){
   .lead,.side{grid-column:span 12;border-right:0;padding:14px 0 0}
-  .body{columns:1}
-  .row3{grid-template-columns:1fr}
-  .col{border-left:0;padding:14px 0 0;border-top:1px solid var(--hair)}
+  .body,.sec-briefs{columns:1}
   .mast-center h1{font-size:44px}
   .couplet,.seal{display:none}
   .handnote{grid-template-columns:1fr}
+  .controls{display:none}
 }
 """
 
 
 def render(ctx, images, gen_at, stats, period):
     lead_it = ctx["lead"][1]
+    lead_id = ctx["lead_id"]
+
     esc_ = esc
-
-    def cap(slot, fallback_host):
-        if slot in images:
-            fname, host = images[slot]
-            return fname, host
-        return None, fallback_host
-
     fig_no = [0]
 
-    def figblock(slot, item, cls, fb_host):
-        fname, host = cap(slot, fb_host)
-        if not fname:
+    def figblock(slot, item, cls, fb_host, override_slot=None):
+        use_slot = override_slot or slot
+        if use_slot in images:
+            fname, host = images[use_slot]
+        elif slot in images:
+            fname, host = images[slot]
+        else:
             return "", ""
         fig_no[0] += 1
         fig = ('<figure class="figwrap %s alive-img ink" style="--d:60ms">'
@@ -495,7 +561,17 @@ def render(ctx, images, gen_at, stats, period):
                     % (fig_no[0], esc_(host)))
         return fig, cap_html
 
-    # ---- 头版
+    def brief_html(it, delay, show_sub=None):
+        subtag = ('<span class="tag sub">%s</span>' % esc_(show_sub)) if show_sub else \
+                 ('<span class="tag">%s</span>' % esc_((it.get("src") or "?").split(" · ")[0][:6]))
+        return ('<article class="brief blk ink" style="--d:%dms"><h4>%s</h4>'
+                '<div class="meta">%s%s · <a href="%s" target="_blank" rel="noopener">原文</a></div></article>'
+                % (delay, esc_(it.get("title")), subtag, esc_(meta_line(it)), esc_(it.get("url"))))
+
+    # ---- 非空版(渲染顺序=版次顺序)
+    live_secs = [(k, n, l, b) for (k, n, l, b) in SECTIONS if ctx["cols"][k]]
+
+    # ================= 第一版:头版 =================
     title = lead_it.get("title") or ""
     m = re.split(r"(?<=[:：])", title, maxsplit=1)
     h_html = esc_(m[0]) + (('<span class="tail">%s</span>' % esc_(m[1])) if len(m) > 1 else "")
@@ -509,12 +585,14 @@ def render(ctx, images, gen_at, stats, period):
     sent = re.split(r"(?<=[。.!?])", desc)
     if sent and 12 < len(sent[0]) <= 70 and stand:
         pull = '<div class="pullquote ink" style="--d:300ms">%s</div>' % esc_(sent[0].strip())
+    # 正文只接导语没讲完的部分,避免与导语开头重复(v1 用户反馈)
+    body_rest = desc[110:] if len(desc) > 150 else ""
+    if body_rest.startswith(("。", ",", "，")):
+        body_rest = body_rest[1:]
     hero_fig, hero_cap = figblock("lead", lead_it, "fig-hero", domain(lead_it.get("url") or ""))
-    body_p = ""
-    if len(desc) > 40:
-        body_p = ('<p class="drop ink" style="--d:160ms">%s</p>' % esc_(desc[:300]))
+    body_p = ('<p class="drop ink" style="--d:160ms">%s</p>' % esc_(body_rest[:300])) if len(body_rest) > 30 else ""
     lead_html = """
-<section class="lead" id="lead">
+<section class="lead blk">
   <div class="kicker">头版 · THE LEAD%s</div>
   <h2 class="headline" id="heroHead">%s</h2>
   %s
@@ -526,60 +604,87 @@ def render(ctx, images, gen_at, stats, period):
                  esc_(lead_it.get("url")), esc_(domain(lead_it.get("url") or "")),
                  hero_fig, hero_cap, body_p + (pull if pull else ""))
 
-    # ---- 要闻纵览
-    side_items = ctx["cols"]["top"]
-    briefs = []
-    for k, (iid, _w) in enumerate(side_items):
+    # 头版侧栏 = 本版各版头条摘要卡
+    digest = []
+    for k, name, latin, _b in live_secs:
+        iid, _w, _sub = ctx["cols"][k][0]
         it = ctx["by_id"][iid][1]
-        briefs.append('<article class="brief ink" style="--d:%dms"><h4>%s</h4>'
-                      '<div class="meta"><span class="tag">%s</span>%s · <a href="%s" target="_blank" rel="noopener">原文</a></div></article>'
-                      % (160 + k * 80, esc_(it.get("title")),
-                         esc_((it.get("src") or "?").split(" · ")[0][:6]), esc_(meta_line(it)),
-                         esc_(it.get("url"))))
-    side_fig, side_cap = ("", "")
-    if side_items:
-        side_fig, side_cap = figblock("top", ctx["by_id"][side_items[0][0]][1], "fig-small",
-                                      domain(ctx["by_id"][side_items[0][0]][1].get("url") or ""))
+        same = '<span class="same">◆ 即上方头条</span>' if iid == lead_id else ""
+        digest.append(
+            '<div class="digestcard blk ink" style="--d:%dms">'
+            '<div class="dsec">%s %s</div><h4>%s</h4>'
+            '<div class="meta">%s · <a href="%s" target="_blank" rel="noopener">原文</a>　%s</div></div>'
+            % (160 + len(digest) * 90, esc_(name), esc_(latin), esc_(it.get("title")),
+               esc_(meta_line(it)), esc_(it.get("url")), same))
     side_html = """
-<aside class="side" id="top">
-  <h3>要闻纵览 <span>IN BRIEF</span></h3>
-  %s%s
-</aside>""" % (side_fig + side_cap, "".join(briefs))
+<aside class="side blk">
+  <h3>本版各版头条 <span>SECTION LEADS</span></h3>
+  %s
+</aside>""" % "".join(digest)
 
-    # ---- 三栏
-    cols_html = []
-    meta = {"top": SECTIONS[0], "tech": SECTIONS[1], "life": SECTIONS[2], "game": SECTIONS[3]}
-    for key, cname, latin, byline in SECTIONS[1:]:
-        rows = []
-        sfig, scap = ("", "")
-        for k, (iid, _w) in enumerate(ctx["cols"][key]):
-            it = ctx["by_id"][iid][1]
-            if k == 0 and not sfig:
-                sfig, scap = figblock(key, it, "fig-small", domain(it.get("url") or ""))
-            rows.append('<article class="brief ink" style="--d:%dms"><h4>%s</h4>'
-                        '<div class="meta">%s · <a href="%s" target="_blank" rel="noopener">原文</a></div></article>'
-                        % (200 + k * 80, esc_(it.get("title")), esc_(meta_line(it)), esc_(it.get("url"))))
-        cols_html.append('<div class="col" id="%s"><div class="head">%s <span>%s · %s</span></div>%s%s%s</div>'
-                         % (key, esc_(cname), esc_(latin), esc_(byline), sfig, scap, "".join(rows)))
-    row3_html = '<section class="row3">%s</section>' % "".join(cols_html)
-
-    # ---- 主编手记
+    # 主编手记(仅头版)
     drops_html = "".join("<li><b>弃</b> %s — %s</li>" % (esc_(ctx["by_id"][d["item_id"]][1].get("title"))[:46],
                                                          esc_(d["reason"])) for d in ctx["dropped"][:4])
     hand_html = """
-<section class="handnote">
+<section class="handnote blk">
   <div><h5>主编手记 · EDITOR'S NOTE</h5><div class="note">%s</div></div>
   <div><h5>取舍留痕 · WHY DROPPED</h5><ul class="drops">%s</ul></div>
 </section>""" % (esc_(ctx["note"]) or "本期依六维评分与版面容量取舍。", drops_html or "<li>无</li>")
 
-    # ---- 顶部
-    ticker_items = [lead_it] + [ctx["by_id"][i][1] for i, _ in side_items]
-    tk = "".join('<span class="tk">%s</span>' % esc_((i.get("title") or "")[:48]) for i in ticker_items[:6])
+    page0 = ('<section class="page active" data-label="第一版 · 头版">'
+             '<div class="grid">%s%s%s</div></section>' % (lead_html, side_html, hand_html))
+
+    # ================= 内版:每版一个板块 =================
+    pages = [page0]
+    for pi, (key, name, latin, byline) in enumerate(live_secs, start=1):
+        items = ctx["cols"][key]
+        iid0, _w0, _sub0 = items[0]
+        fit = ctx["by_id"][iid0][1]
+        # 头条图:如果本版头条就是头版大图那条,复用 p_lead
+        ov = "lead" if iid0 == lead_id else key
+        f_fig, f_cap = figblock(key, fit, "fig-sec", domain(fit.get("url") or ""), override_slot=ov)
+        fdesc = (fit.get("desc") or "").strip()
+        if fdesc.startswith((fit.get("title") or "")[:20]):
+            fdesc = fdesc[len((fit.get("title") or "")[:20]):].lstrip(" 　-—|")
+        f_stand = ('<p class="standfirst ink" style="--d:120ms">%s</p>' % esc_(fdesc[:130])) \
+            if len(fdesc) > 24 else ""
+        feature = """
+<div class="sec-feature blk">
+  <div class="kicker">%s · 本版头条 · %s</div>
+  <h2 class="headline" style="font-size:32px">%s</h2>
+  %s
+  <div class="byline">%s · <a href="%s" target="_blank" rel="noopener">原文 @ %s</a>　%s</div>
+  %s%s
+</div>""" % (esc_(name), esc_(byline), esc_(fit.get("title")), f_stand,
+                 esc_(byline), esc_(fit.get("url")), esc_(domain(fit.get("url") or "")),
+                 esc_(meta_line(fit)), f_fig, f_cap)
+        briefs = []
+        for k2, (iid, _w, sub) in enumerate(items[1:], 1):
+            it = ctx["by_id"][iid][1]
+            briefs.append(brief_html(it, 200 + k2 * 70, show_sub=(sub if key == "tech" else None)))
+        page = ('<section class="page" data-label="第%s版 · %s">'
+                '<div class="pagefolio"><span><b>第%s版</b></span><span>活字新报 · %s %s</span>'
+                '<span>第 %d 期 · %s</span></div>'
+                '%s<div class="sec-briefs">%s</div></section>'
+                % (CN_NUM[pi], esc_(name), CN_NUM[pi], esc_(name), esc_(latin),
+                   period, datetime.date.today().strftime("%Y-%m-%d"),
+                   feature, "".join(briefs)))
+        pages.append(page)
+
+    # ================= 顶部/底部/控件 =================
+    ticker_items = [lead_it] + [ctx["by_id"][ctx["cols"][k][0][0]][1] for k, _n, _l, _b in live_secs]
+    tk = "".join('<span class="tk">%s</span>' % esc_((i.get("title") or "")[:48]) for i in ticker_items[:7])
     today = datetime.date.today()
     wd = "一二三四五六日"[today.weekday()]
-    all_items = [lead_it] + [ctx["by_id"][iid][1] for col in ctx["cols"].values() for iid, _ in col]
-    read_min = max(1, round(sum(len(i.get("title") or "") + len(i.get("desc") or "") for i in all_items) / 300))
+    all_items = [ctx["by_id"][iid][1] for col in ctx["cols"].values() for iid, _w, _s in col]
+    read_min = max(1, round(sum(len(i.get("title") or "") + len(i.get("desc") or "")
+                                for i in all_items) / 300))
     n_items = len(all_items)
+    npages = len(pages)
+
+    tabs = ['<button data-go="0" class="on">头版<span>FRONT</span></button>']
+    for i, (_k, name, latin, _b) in enumerate(live_secs, start=1):
+        tabs.append('<button data-go="%d">%s<span>%s</span></button>' % (i, esc_(name), esc_(latin)))
 
     top_html = """
 <header>
@@ -595,25 +700,27 @@ def render(ctx, images, gen_at, stats, period):
   </div>
   <div class="rule-double"></div>
   <div class="folio">
-    <span>第 %d 期</span>
+    <span>第 %d 期 · 共 %d 版</span>
     <span>%d 年 %d 月 %d 日 · 星期%s</span>
     <span>本期 %d 条 · 约 %d 分钟 · 定价:一盏茶</span>
   </div>
   <div class="ticker"><div class="track"><span class="tk">%s</span><span class="tk">%s</span></div></div>
-  <nav class="sections">
-    <a href="#lead">头版<span>FRONT PAGE</span></a>
-    <a href="#top">要闻<span>BRIEF</span></a>
-    <a href="#tech">科技<span>TECH</span></a>
-    <a href="#life">生活<span>LIVING</span></a>
-    <a href="#game">游戏<span>GAMES</span></a>
-  </nav>
-</header>""" % (period, today.year, today.month, today.day, wd, n_items, read_min, tk, tk)
+  <nav class="tabs">%s</nav>
+</header>""" % (period, npages, today.year, today.month, today.day, wd,
+                 n_items, read_min, tk, tk, "".join(tabs))
 
     footer_html = """
 <footer>
   <span>生成于 %s · movable-type MVP</span>
   <span>%s · 配图 og:image · 灰度统一</span>
 </footer>""" % (gen_at, esc_(stats))
+
+    pager_html = """
+<div class="pager">
+  <button id="pgPrev">&#9664; 上一版</button>
+  <span class="pinfo" id="pgInfo">第 <b>1</b> / %d 版 · 头版</span>
+  <button id="pgNext">下一版 &#9654;</button>
+</div>""" % npages
 
     doc = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -627,14 +734,13 @@ def render(ctx, images, gen_at, stats, period):
 <div class="stage">
   <div class="sheet alive-img alive-text" id="sheet"><div class="inner">
     %s
-    <main class="grid">
-      %s%s
-      %s
-      %s
+    <main class="pages" id="pages">
       %s
     </main>
+    %s
   </div></div>
 </div>
+%s
 <div class="controls">
   <label><input type="checkbox" id="tImg" checked> 图动</label>
   <label><input type="checkbox" id="tTxt" checked> 字动</label>
@@ -644,12 +750,54 @@ def render(ctx, images, gen_at, stats, period):
 <script>
 (function(){
   var sheet=document.getElementById('sheet');
+  var pages=[].slice.call(document.querySelectorAll('.page'));
+  var tabs=[].slice.call(document.querySelectorAll('nav.tabs button'));
+  var cur=0,busy=false;
+  var labels=pages.map(function(p){return p.getAttribute('data-label')||('第'+(pages.indexOf(p)+1)+'版')});
+  var reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function assignI(page){
+    var blks=[].slice.call(page.querySelectorAll('.blk'));
+    blks.forEach(function(el,i){el.style.setProperty('--i',i)});
+    return blks;
+  }
+  function updPager(){
+    document.getElementById('pgInfo').innerHTML='第 <b>'+(cur+1)+'</b> / '+pages.length+' 版 · '+labels[cur];
+    document.getElementById('pgPrev').disabled=(cur===0);
+    document.getElementById('pgNext').disabled=(cur===pages.length-1);
+    tabs.forEach(function(b,i){b.classList.toggle('on',i===cur)});
+  }
+  function go(n){
+    if(busy||n===cur||n<0||n>=pages.length)return;
+    var out=pages[cur],inn=pages[n];
+    if(reduced){
+      out.classList.remove('active');inn.classList.add('active');
+      cur=n;updPager();return;
+    }
+    busy=true;
+    assignI(out);out.classList.add('pg-out');
+    setTimeout(function(){
+      out.classList.remove('active','pg-out');
+      assignI(inn);inn.classList.add('active','pg-in');
+      cur=n;updPager();
+      if(cur===0)typeHead();
+      setTimeout(function(){inn.classList.remove('pg-in');busy=false;},620);
+    },430);
+  }
+  document.getElementById('pgPrev').addEventListener('click',function(){go(cur-1)});
+  document.getElementById('pgNext').addEventListener('click',function(){go(cur+1)});
+  tabs.forEach(function(b,i){b.addEventListener('click',function(){go(i)})});
+  document.addEventListener('keydown',function(e){
+    if(e.key==='ArrowRight'||e.key==='PageDown'){go(cur+1)}
+    else if(e.key==='ArrowLeft'||e.key==='PageUp'){go(cur-1)}
+  });
+
   document.getElementById('tImg').addEventListener('change',function(e){sheet.classList.toggle('alive-img',e.target.checked)});
   document.getElementById('tTxt').addEventListener('change',function(e){sheet.classList.toggle('alive-text',e.target.checked);if(e.target.checked)typeHead()});
   var head=document.getElementById('heroHead');
-  var full=head.textContent.trim(),typing=false;
+  var full=head?head.textContent.trim():'',typing=false;
   function typeHead(){
-    if(typing)return;
+    if(!head||typing)return;
     if(!sheet.classList.contains('alive-text')){head.textContent=full;return}
     typing=true;head.textContent='';head.classList.add('typing');
     var caret=document.createElement('span');caret.className='caret';head.appendChild(caret);
@@ -658,7 +806,7 @@ def render(ctx, images, gen_at, stats, period):
       caret.insertAdjacentText('beforebegin',full.charAt(i));i++;
     },24);
   }
-  typeHead();
+  typeHead();updPager();
   document.getElementById('replay').addEventListener('click',function(){
     typing=false;
     sheet.classList.remove('alive-text');void sheet.offsetWidth;sheet.classList.add('alive-text');
@@ -668,7 +816,8 @@ def render(ctx, images, gen_at, stats, period):
 })();
 </script>
 </body>
-</html>""" % (esc_("活字新报 " + str(today)), CSS, top_html, lead_html, side_html, row3_html, hand_html, footer_html)
+</html>""" % (esc_("活字新报 第%d期" % period), CSS, top_html, "".join(pages),
+                 footer_html, pager_html)
     return doc
 
 
@@ -689,8 +838,9 @@ def main():
     cands = coarse(items)
     log("粗筛候选 %d" % len(cands))
 
-    # 决策缓存:同一批候选不重复烧 token
-    sig = hashlib.sha1(json.dumps(cands_payload(cands), ensure_ascii=False).encode()).hexdigest()[:12]
+    # 决策缓存:签名含提示词版本,改提示词自动失效
+    sig = hashlib.sha1((PROMPT_VER + json.dumps(cands_payload(cands),
+                                                ensure_ascii=False)).encode()).hexdigest()[:12]
     cache = os.path.join(DEC_DIR, "decision_%s.json" % sig)
     dec = None
     if os.path.exists(cache):
@@ -712,10 +862,10 @@ def main():
         log("决策非法(%s),回退规则排版" % e)
         ctx = normalize_decision(rule_edit(cands), cands)
 
-    # 配图:头版 + 各栏(每栏按分值顺位找非聚合链接)
+    # 配图:头版大图 + 每个非空版(同 URL 复用)
     plan = [("lead", [ctx["lead"][1]])]
-    for key in ("top", "tech", "life", "game"):
-        pool = [ctx["by_id"][iid][1] for iid, _ in ctx["cols"][key]]
+    for key, _n, _l, _b in SECTIONS:
+        pool = [ctx["by_id"][iid][1] for iid, _w, _s in ctx["cols"][key]]
         if pool:
             plan.append((key, pool))
     images = fetch_images(plan)
@@ -730,8 +880,9 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "index.html")
     open(out, "w", encoding="utf-8").write(doc)
-    n_img = sum(1 for c in ctx["cols"].values() for _ in c) + 1
-    log("成版 -> %s (头版+%d条,配图%d)" % (out, n_img - 1, len(images)))
+    n_pages = 1 + sum(1 for k, _n, _l, _b in SECTIONS if ctx["cols"][k])
+    n_items = sum(len(c) for c in ctx["cols"].values())
+    log("成版 -> %s (%d 版, %d 条, 配图 %d)" % (out, n_pages, n_items, len(images)))
     return 0
 
 
