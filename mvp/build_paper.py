@@ -498,6 +498,25 @@ nav.tabs span{color:var(--muted);font-size:9.5px;letter-spacing:.14em;margin-lef
 .handnote .drops{font-size:11.5px;color:#4c432f;line-height:1.7}
 .handnote .drops li{margin-bottom:3px}
 .handnote .drops b{color:var(--seal);font-weight:600}
+/* ---------- 阶段B: 追踪 ---------- */
+.trk{display:none;font:inherit;font-size:10px;letter-spacing:.1em;color:var(--seal);background:none;
+  border:1px solid var(--seal);border-radius:3px;padding:0 7px;cursor:pointer;margin-left:6px;vertical-align:1px}
+body.tk-on .trk{display:inline-block}
+.trk:hover{background:rgba(158,43,37,.08)}
+.trk.done{background:var(--seal);color:var(--paper);cursor:default;opacity:.75}
+.trackregion{grid-column:span 12;margin-top:20px;border:1px solid var(--rule);
+  background:rgba(255,252,240,.5);padding:12px 16px}
+.trackregion h5{margin:0 0 8px;font-size:11.5px;letter-spacing:.3em;color:var(--seal)}
+.trackregion h5 a{color:var(--seal);text-decoration:none;letter-spacing:.1em;font-size:10px;margin-left:10px}
+.trackregion h5 a:hover{text-decoration:underline}
+.trackregion .tempty{font-size:12px;color:var(--muted);line-height:1.7}
+.tcard{display:flex;justify-content:space-between;gap:14px;align-items:baseline;
+  border-bottom:1px dotted var(--hair);padding:6px 0;font-size:13.5px}
+.tcard:last-child{border-bottom:0}
+.tcard a{color:var(--ink);text-decoration:none;font-weight:600}
+.tcard a:hover{color:var(--seal)}
+.tcard .tmeta{font-size:11px;color:var(--muted);white-space:nowrap;letter-spacing:.05em}
+.tcard .tmeta b{color:var(--seal);font-size:13px}
 footer{margin-top:18px;border-top:1px solid var(--rule);padding-top:8px;
   display:flex;justify-content:space-between;font-size:11px;color:var(--muted);letter-spacing:.1em}
 /* ---------- 翻版控件 ---------- */
@@ -561,12 +580,27 @@ def render(ctx, images, gen_at, stats, period):
                     % (fig_no[0], esc_(host)))
         return fig, cap_html
 
+    def trk_btn(it):
+        """阶段B: 追踪按钮。article_id 走与库内一致的规范链接身份;
+        身份算不出就不放按钮(宁缺勿错)。默认 CSS 隐藏,页面确认服务可用才点亮。"""
+        try:
+            from newsdesk_db import article_id_for, canonical_url
+            c = canonical_url(it.get("url"))
+            if not c:
+                return ""
+            aid = article_id_for(c)
+        except Exception:
+            return ""
+        return ('<button class="trk" data-aid="%s" data-title="%s">追踪</button>'
+                % (aid, esc_((it.get("title") or "")[:60])))
+
     def brief_html(it, delay, show_sub=None):
         subtag = ('<span class="tag sub">%s</span>' % esc_(show_sub)) if show_sub else \
                  ('<span class="tag">%s</span>' % esc_((it.get("src") or "?").split(" · ")[0][:6]))
         return ('<article class="brief blk ink" style="--d:%dms"><h4>%s</h4>'
-                '<div class="meta">%s%s · <a href="%s" target="_blank" rel="noopener">原文</a></div></article>'
-                % (delay, esc_(it.get("title")), subtag, esc_(meta_line(it)), esc_(it.get("url"))))
+                '<div class="meta">%s%s · <a href="%s" target="_blank" rel="noopener">原文</a>%s</div></article>'
+                % (delay, esc_(it.get("title")), subtag, esc_(meta_line(it)),
+                   esc_(it.get("url")), trk_btn(it)))
 
     # ---- 非空版(渲染顺序=版次顺序)
     live_secs = [(k, n, l, b) for (k, n, l, b) in SECTIONS if ctx["cols"][k]]
@@ -596,12 +630,13 @@ def render(ctx, images, gen_at, stats, period):
   <div class="kicker">头版 · THE LEAD%s</div>
   <h2 class="headline" id="heroHead">%s</h2>
   %s
-  <div class="byline">本报首席记者 · 综合%s 报道　%s　|　<a href="%s" target="_blank" rel="noopener">原文 @ %s</a></div>
+  <div class="byline">本报首席记者 · 综合%s 报道　%s　|　<a href="%s" target="_blank" rel="noopener">原文 @ %s</a>%s</div>
   %s%s
   <div class="body">%s</div>
 </section>""" % (kicker_ent, h_html, stand, esc_((lead_it.get("src") or "").split(" · ")[0]),
                  esc_((lead_it.get("ts") or "")[:16].replace("T", " ")),
                  esc_(lead_it.get("url")), esc_(domain(lead_it.get("url") or "")),
+                 trk_btn(lead_it),
                  hero_fig, hero_cap, body_p + (pull if pull else ""))
 
     # 头版侧栏 = 本版各版头条摘要卡
@@ -613,9 +648,9 @@ def render(ctx, images, gen_at, stats, period):
         digest.append(
             '<div class="digestcard blk ink" style="--d:%dms">'
             '<div class="dsec">%s %s</div><h4>%s</h4>'
-            '<div class="meta">%s · <a href="%s" target="_blank" rel="noopener">原文</a>　%s</div></div>'
+            '<div class="meta">%s · <a href="%s" target="_blank" rel="noopener">原文</a>%s　%s</div></div>'
             % (160 + len(digest) * 90, esc_(name), esc_(latin), esc_(it.get("title")),
-               esc_(meta_line(it)), esc_(it.get("url")), same))
+               esc_(meta_line(it)), esc_(it.get("url")), trk_btn(it), same))
     side_html = """
 <aside class="side blk">
   <h3>本版各版头条 <span>SECTION LEADS</span></h3>
@@ -631,8 +666,16 @@ def render(ctx, images, gen_at, stats, period):
   <div><h5>取舍留痕 · WHY DROPPED</h5><ul class="drops">%s</ul></div>
 </section>""" % (esc_(ctx["note"]) or "本期依六维评分与版面容量取舍。", drops_html or "<li>无</li>")
 
+    # 阶段B: 追踪进展区(只读渲染由 JS 拉 /api/follows; 服务不在则显示只读说明)
+    track_html = """
+<section class="trackregion blk" id="trackRegion">
+  <h5>追踪进展 · TRACKED <a href="/follows" id="allFollows" style="display:none">全部故事线 →</a></h5>
+  <div class="tempty" id="trackBody">正在检查本地追踪服务…</div>
+</section>"""
+
     page0 = ('<section class="page active" data-label="第一版 · 头版">'
-             '<div class="grid">%s%s%s</div></section>' % (lead_html, side_html, hand_html))
+             '<div class="grid">%s%s%s%s</div></section>'
+             % (lead_html, side_html, hand_html, track_html))
 
     # ================= 内版:每版一个板块 =================
     pages = [page0]
@@ -653,11 +696,11 @@ def render(ctx, images, gen_at, stats, period):
   <div class="kicker">%s · 本版头条 · %s</div>
   <h2 class="headline" style="font-size:32px">%s</h2>
   %s
-  <div class="byline">%s · <a href="%s" target="_blank" rel="noopener">原文 @ %s</a>　%s</div>
+  <div class="byline">%s · <a href="%s" target="_blank" rel="noopener">原文 @ %s</a>　%s%s</div>
   %s%s
 </div>""" % (esc_(name), esc_(byline), esc_(fit.get("title")), f_stand,
                  esc_(byline), esc_(fit.get("url")), esc_(domain(fit.get("url") or "")),
-                 esc_(meta_line(fit)), f_fig, f_cap)
+                 esc_(meta_line(fit)), trk_btn(fit), f_fig, f_cap)
         briefs = []
         for k2, (iid, _w, sub) in enumerate(items[1:], 1):
             it = ctx["by_id"][iid][1]
@@ -813,6 +856,64 @@ def render(ctx, images, gen_at, stats, period):
     sheet.classList.remove('alive-img');void sheet.offsetWidth;sheet.classList.add('alive-img');
     typeHead();
   });
+
+  /* ---- 阶段B 追踪接线: 服务不在 -> 诚实只读,不装能保存(SPEC §3) ---- */
+  var TCAND=[7777,8090,9090,9527,8642];   /* 与 track_server 的 MT_TRACK_PORTS 默认一致 */
+  var TBASE=null;
+  var TOKEL=document.querySelector('meta[name="track-token"]');
+  var TOK=TOKEL?TOKEL.getAttribute('content'):null;
+  var tbody=document.getElementById('trackBody');
+  function escj(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){
+    return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':'&quot;';});}
+  function ro(msg){ if(tbody) tbody.innerHTML='<b style="color:#9e2b25">只读模式</b> · '+msg;
+    document.getElementById('allFollows').style.display='none'; }
+  function loadFollows(){
+    fetch(TBASE+'/api/follows?status=active').then(function(r){return r.json()}).then(function(fs){
+      if(!fs.length){ tbody.innerHTML='还没有追踪的事件。点新闻旁的「追踪」关注一条故事线。';
+        document.getElementById('allFollows').style.display=''; return; }
+      document.getElementById('allFollows').style.display='';
+      tbody.innerHTML=fs.map(function(f){
+        var d=(f.last_node_at||f.followed_at||'').slice(0,10);
+        return '<div class="tcard"><a href="'+TBASE+'/storyline/'+f.event_id+'">'+escj(f.display_name)+
+          '</a><span class="tmeta">未读 <b>'+(f.unread||0)+'</b> · 更新 '+d+'</span></div>';
+      }).join('');
+      // 已追踪事件的报道按钮置灰
+      var tracked={};
+      fs.forEach(function(f){ (f.article_ids||[]).forEach(function(a){tracked[a]=1}) });
+      [].forEach.call(document.querySelectorAll('.trk'),function(b){
+        if(tracked[b.getAttribute('data-aid')]){b.classList.add('done');b.textContent='已追踪'}
+      });
+    }).catch(function(){ ro('本地追踪服务未启动。用 <b>看报纸.cmd</b> 打开即可追踪;直接开 HTML 文件只能看。') });
+  }
+  function probe(i){
+    if(i>=TCAND.length){
+      ro('本地追踪服务未启动。用 <b>看报纸.cmd</b> 打开即可追踪;直接开 HTML 文件只能看。'); return; }
+    TBASE='http://127.0.0.1:'+TCAND[i];
+    fetch(TBASE+'/api/status').then(function(r){return r.json()}).then(function(st){
+      if(!st.ok) throw 0;
+      if(!TOK){ ro('页面未经追踪服务打开,保存功能锁定。请访问 '+TBASE+'/ 使用完整功能。'); return; }
+      document.body.classList.add('tk-on');
+      tbody.innerHTML='正在加载…';
+      loadFollows();
+      // 追踪按钮(只绑一次:服务找到后不再重复探测)
+      document.addEventListener('click',function(e){
+        var b=e.target.closest?e.target.closest('.trk'):null;
+        if(!b||b.classList.contains('done'))return;
+        var aid=b.getAttribute('data-aid'), t=b.getAttribute('data-title')||'';
+        if(!window.confirm('追踪这件事?\\n\\n「'+t+'」\\n\\n它的新进展将进入你的追踪区。'))return;
+        b.disabled=true;
+        fetch(TBASE+'/api/track',{method:'POST',headers:{'Content-Type':'application/json',
+          'X-Track-Token':TOK},body:JSON.stringify({article_id:aid})})
+        .then(function(r){return r.json()}).then(function(j){
+          b.disabled=false;
+          if(j.error){ alert('未保存:'+j.error); return; }
+          b.classList.add('done'); b.textContent='已追踪';
+          loadFollows();
+        }).catch(function(){ b.disabled=false; alert('未保存:服务不可达,请重试'); });
+      });
+    }).catch(function(){ probe(i+1); });
+  }
+  probe(0);
 })();
 </script>
 </body>
@@ -843,6 +944,20 @@ def main():
             % (r["new"], r["updated"], r["skipped"], r["run_id"]))
     except Exception as e:
         log("入库失败(不影响出报): %r" % e)
+        newsdesk_db = None
+
+    # 阶段B: 活跃事件的直接进展扫描(SPEC §9: 每天随出报执行一次;失败不拖垮出报)
+    if newsdesk_db is not None:
+        try:
+            sc = newsdesk_db.scan_progress()
+            if sc["added"]:
+                log("进展扫描: %d 活跃事件, 新增节点 %d %s"
+                    % (len(sc["per_event"]), sc["added"],
+                       {k: v for k, v in sc["per_event"].items() if v}))
+            else:
+                log("进展扫描: %d 活跃事件, 无新增" % len(sc["per_event"]))
+        except Exception as e:
+            log("进展扫描失败(不影响出报): %r" % e)
 
     cands = coarse(items)
     log("粗筛候选 %d" % len(cands))

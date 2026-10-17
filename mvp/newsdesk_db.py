@@ -19,6 +19,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import urllib.parse
@@ -80,6 +81,40 @@ CREATE TABLE IF NOT EXISTS runs (
   result      TEXT,                             -- ok | error
   articles_new INTEGER, articles_updated INTEGER, articles_skipped INTEGER,
   duration_ms INTEGER, error TEXT
+);
+-- ================= 阶段B: 追踪(SPEC §4 Event/Node/Follow) =================
+CREATE TABLE IF NOT EXISTS events (
+  event_id        TEXT PRIMARY KEY,             -- e_<sha1(创始报道)12> 永久身份
+  display_name    TEXT,                         -- 创始报道标题截断(显示用)
+  origin_article_id TEXT,
+  status          TEXT DEFAULT 'active',
+  first_seen_at   TEXT,
+  max_seq         INTEGER DEFAULT 0,            -- 节点更新序号水位(已读位置的参照)
+  last_node_at    TEXT                          -- 最近节点收录时间(排序用)
+);
+CREATE TABLE IF NOT EXISTS nodes (
+  node_id     TEXT PRIMARY KEY,                 -- n_<sha1(event+article)12>
+  event_id    TEXT,
+  article_id  TEXT,
+  node_type   TEXT,                             -- origin(创始) | direct(直接进展)
+  occurred_at TEXT,                             -- 发生/发表时间(原始时区)
+  occurred_precision TEXT,
+  seq         INTEGER,                          -- 事件内单调递增 = 已读位置口径(SPEC §6)
+  match_score REAL,                             -- 规则匹配分(留痕供人工复核)
+  first_seen_run INTEGER,
+  created_at  TEXT,
+  UNIQUE(event_id, article_id)                  -- 同事件同报道只挂一次 -> 重跑不重复追加
+);
+CREATE TABLE IF NOT EXISTS follows (
+  follow_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_local  TEXT DEFAULT 'local',
+  event_id    TEXT,
+  status      TEXT DEFAULT 'active',            -- active | archived(关闭即归档)
+  followed_at TEXT,
+  archived_at TEXT,
+  last_visible_seq INTEGER,                     -- 归档时最后可见版本
+  last_read_seq INTEGER DEFAULT 0,
+  UNIQUE(user_local, event_id)
 );
 """
 
@@ -253,6 +288,243 @@ def stats(db_path=None):
         out["versioned"] = conn.execute(
             "SELECT COUNT(*) c FROM articles WHERE current_version>1").fetchone()["c"]
         return out
+    finally:
+        conn.close()
+
+
+# ================================================================ 阶段B: 追踪
+# 落地 SPEC §6 用户操作 + §5 第五步直接进展判定(阶段B只做"规则可判"的部分,
+# 转述合并/冲突/更正是阶段C,LLM 归属判定也是C——B 不碰模型)。
+
+def track_article(article_id, db_path=None):
+    """开启追踪: 报道 -> 事件 -> origin 节点 -> active follow。幂等。
+    首轮: 一篇报道对应一个事件(event_id 派生自创始报道身份, 永久稳定)。
+    返回 {event_id, display_name, created} 或 {"error": ...}"""
+    conn = connect(db_path or DEFAULT_DB)
+    try:
+        art = conn.execute(
+            "SELECT title, url_canonical FROM articles WHERE article_id=?",
+            (article_id,)).fetchone()
+        if art is None:
+            return {"error": "报道不存在(不在已入库材料中)"}
+        # 该报道已是某事件的 origin/节点 -> 关联既有事件而不是新建
+        node = conn.execute(
+            "SELECT event_id FROM nodes WHERE article_id=? LIMIT 1",
+            (article_id,)).fetchone()
+        created = False
+        if node is not None:
+            event_id = node["event_id"]
+        else:
+            event_id = "e_" + hashlib.sha1(article_id.encode("utf-8")).hexdigest()[:16]
+            created = True
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            name = (art["title"] or "").strip()[:60]
+            conn.execute(
+                "INSERT INTO events(event_id,display_name,origin_article_id,"
+                "first_seen_at,max_seq) VALUES(?,?,?,?,0)",
+                (event_id, name, article_id, now))
+            conn.execute(
+                "INSERT OR IGNORE INTO nodes(node_id,event_id,article_id,node_type,"
+                "occurred_at,occurred_precision,seq,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                ("n_" + event_id[2:], event_id, article_id, "origin",
+                 None, "unknown", 0, now))
+            conn.execute("UPDATE events SET max_seq=0 WHERE event_id=?", (event_id,))
+        # follow 幂等: 已有 active 不重复建
+        fol = conn.execute(
+            "SELECT status FROM follows WHERE user_local='local' AND event_id=?",
+            (event_id,)).fetchone()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if fol is None:
+            conn.execute(
+                "INSERT INTO follows(user_local,event_id,status,followed_at,last_read_seq)"
+                " VALUES('local',?,?,?,?)", (event_id, "active", now, 0))
+        elif fol["status"] == "archived":
+            # 首轮不做恢复追踪(SPEC §6): 归档即终态,重复点击给明确提示
+            return {"error": "该事件已归档(首轮不支持恢复追踪)", "event_id": event_id}
+        conn.commit()
+        return {"event_id": event_id,
+                "display_name": conn.execute(
+                    "SELECT display_name FROM events WHERE event_id=?",
+                    (event_id,)).fetchone()["display_name"],
+                "created": created}
+    finally:
+        conn.close()
+
+
+def untrack_event(event_id, db_path=None):
+    """关闭追踪 = 归档(SPEC §6): 记关闭时间与最后可见版本,故事线保留。"""
+    conn = connect(db_path or DEFAULT_DB)
+    try:
+        ev = conn.execute("SELECT max_seq FROM events WHERE event_id=?",
+                          (event_id,)).fetchone()
+        if ev is None:
+            return {"error": "事件不存在"}
+        fol = conn.execute(
+            "SELECT status FROM follows WHERE user_local='local' AND event_id=?",
+            (event_id,)).fetchone()
+        if fol is None:
+            return {"error": "没有该追踪"}
+        if fol["status"] == "archived":
+            return {"event_id": event_id, "status": "archived", "changed": False}
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn.execute(
+            "UPDATE follows SET status='archived', archived_at=?, last_visible_seq=? "
+            "WHERE user_local='local' AND event_id=?", (now, ev["max_seq"], event_id))
+        conn.commit()
+        return {"event_id": event_id, "status": "archived", "changed": True}
+    finally:
+        conn.close()
+
+
+def list_follows(status="active", db_path=None):
+    """追踪列表: 事件标题 + 未读更新数 + 最近更新 + 关注时间。"""
+    conn = connect(db_path or DEFAULT_DB)
+    try:
+        rows = conn.execute(
+            "SELECT f.event_id, f.status, f.followed_at, f.archived_at, f.last_read_seq,"
+            " f.last_visible_seq, e.display_name, e.max_seq, e.last_node_at,"
+            " (SELECT COUNT(*) FROM nodes n WHERE n.event_id=f.event_id"
+            "   AND n.seq>f.last_read_seq) AS unread"
+            " FROM follows f JOIN events e ON e.event_id=f.event_id"
+            " WHERE f.user_local='local' AND f.status=?"
+            " ORDER BY COALESCE(e.last_node_at, f.followed_at) DESC",
+            (status,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def storyline(event_id, db_path=None, read_seq=None):
+    """故事线: 节点按 seq 升序 + 每节点带原文证据(SPEC §6 详情)。
+    read_seq>0 时标 is_unread; 关注分界 = origin 节点之后。"""
+    conn = connect(db_path or DEFAULT_DB)
+    try:
+        ev = conn.execute("SELECT * FROM events WHERE event_id=?", (event_id,)).fetchone()
+        if ev is None:
+            return {"error": "事件不存在"}
+        rows = conn.execute(
+            "SELECT n.*, a.title, a.url_original, a.url_canonical, a.source_id,"
+            " a.published_at, a.group_name"
+            " FROM nodes n JOIN articles a ON a.article_id=n.article_id"
+            " WHERE n.event_id=? ORDER BY n.seq", (event_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["is_unread"] = (read_seq is not None and d["seq"] > read_seq)
+            out.append(d)
+        return {"event": dict(ev), "nodes": out}
+    finally:
+        conn.close()
+
+
+def mark_read(event_id, db_path=None):
+    """标记已读: 位置 = 当前 max_seq(SPEC §6: 用更新序号不用时间)。"""
+    conn = connect(db_path or DEFAULT_DB)
+    try:
+        ev = conn.execute("SELECT max_seq FROM events WHERE event_id=?",
+                          (event_id,)).fetchone()
+        if ev is None:
+            return {"error": "事件不存在"}
+        conn.execute(
+            "UPDATE follows SET last_read_seq=? WHERE user_local='local' AND event_id=?",
+            (ev["max_seq"], event_id))
+        conn.commit()
+        return {"event_id": event_id, "last_read_seq": ev["max_seq"]}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------- 进展扫描(B: 规则)
+_RE_RETELL = re.compile(r"转述|报道|获悉|表示|宣布|消息人士|sources?:|according to|"
+                        r"report(ed|s)?|says?|confirmed?", re.I)
+
+
+def _toks(text):
+    """粗分词: 英文按词,中文按二元组。够 B 阶段做候选重合度。"""
+    text = (text or "").lower()
+    eng = set(re.findall(r"[a-z][a-z0-9]{2,}", text))
+    cjk = re.findall(r"[一-鿿]+", text)
+    big = set()
+    for seg in cjk:
+        big.update(seg[i:i + 2] for i in range(len(seg) - 1))
+    return eng | big
+
+
+def scan_progress(db_path=None, top_k=3, min_overlap=2):
+    """每日直接进展扫描(SPEC §5 第五步的 B 阶段规则版):
+    对每个 active 事件, 在**全量合格材料**(不截断粗筛, SPEC §5 第二步)里找
+    与事件既有报道 token 重合>=min_overlap 的新报道 -> 挂 direct 节点。
+    - 同一 (event, article) UNIQUE -> 天然幂等, 重跑不重复追加
+    - B 阶段不做归属 LLM/转述合并(那是 C), 先把"新节点进来+跨期保存"跑通
+    返回 {checked, added, per_event}。"""
+    db_path = db_path or DEFAULT_DB
+    conn = connect(db_path)
+    try:
+        follows = conn.execute(
+            "SELECT event_id FROM follows WHERE user_local='local' AND status='active'"
+        ).fetchall()
+        if not follows:
+            return {"checked": 0, "added": 0, "per_event": {}}
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        # 事件画像 = 创始报道标题(固定画像)。⚠️ 不能用"所有节点并集":节点越多画像越大,
+        # 每轮扫描都会比上一轮多抓(实测 3->25 节点滚雪球),同输入重跑不再同输出。
+        # 判定新进展的措辞漂移是阶段C(LLM)的事,B 阶段钉死画像换幂等。
+        profiles = {}
+        for f in follows:
+            eid = f["event_id"]
+            row = conn.execute(
+                "SELECT a.title FROM events e JOIN articles a"
+                " ON a.article_id=e.origin_article_id WHERE e.event_id=?",
+                (eid,)).fetchone()
+            if row is None or not row["title"]:
+                ev = conn.execute("SELECT display_name FROM events WHERE event_id=?",
+                                  (eid,)).fetchone()
+                title = ev["display_name"] if ev else ""
+            else:
+                title = row["title"]
+            profiles[eid] = _toks(title)
+        # 材料 = 全库报道(合格: 有标题有链接)
+        all_arts = conn.execute(
+            "SELECT article_id, title, published_at, published_precision FROM articles"
+            " WHERE title IS NOT NULL AND title!=''").fetchall()
+        added = checked = 0
+        per_event = {}
+        for eid, prof in profiles.items():
+            if not prof:
+                continue
+            have = {r["article_id"] for r in conn.execute(
+                "SELECT article_id FROM nodes WHERE event_id=?", (eid,)).fetchall()}
+            seq = conn.execute("SELECT max_seq FROM events WHERE event_id=?",
+                               (eid,)).fetchone()["max_seq"]
+            n_add = 0
+            for a in all_arts:
+                checked += 1
+                if a["article_id"] in have:
+                    continue
+                ov = len(_toks(a["title"]) & prof)
+                if ov < min_overlap:
+                    continue
+                seq += 1
+                conn.execute(
+                    "INSERT OR IGNORE INTO nodes(node_id,event_id,article_id,node_type,"
+                    "occurred_at,occurred_precision,seq,match_score,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("n_%s_%s" % (eid[2:], a["article_id"][2:]), eid, a["article_id"],
+                     "direct", a["published_at"],
+                     a["published_precision"] or "minute", seq, float(ov), now))
+                n_add += 1
+                have.add(a["article_id"])
+                added += 1
+            if n_add:
+                conn.execute(
+                    "UPDATE events SET max_seq=?, last_node_at=? WHERE event_id=?",
+                    (seq, now, eid))
+            per_event[eid] = n_add
+        conn.commit()
+        return {"checked": checked, "added": added, "per_event": per_event}
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
