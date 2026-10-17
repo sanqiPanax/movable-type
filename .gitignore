@@ -15,6 +15,10 @@ out/
 # caches
 .cache/
 *.log
+__pycache__/
+mvp/newsdesk/_cache/
+mvp/newsdesk/_x_tmp/
+mvp/newsdesk/_x_log/
 
 # MVP runtime data (regenerable; news snapshot + LLM decision cache)
 mvp/data/
