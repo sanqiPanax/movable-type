@@ -1,0 +1,73 @@
+{
+  "_说明": "新闻重要性评分配置。改完保存即可生效(服务按 mtime 热加载,不用重启)。字段含义见 newsdesk_scoring.py 顶部注释。",
+
+  "weights": {
+    "source": 25,
+    "impact": 20,
+    "exclusivity": 15,
+    "evidence": 15,
+    "irreversibility": 10,
+    "hooks": 15
+  },
+
+  "source_tiers": {
+    "techmeme":          {"tier": "T1", "score": 75},
+    "arstechnica":       {"tier": "T1", "score": 75},
+    "theverge":          {"tier": "T1", "score": 70},
+    "solidot":           {"tier": "T2", "score": 55},
+    "qbitai":            {"tier": "T2", "score": 55},
+    "gnews_ai":          {"tier": "T2", "score": 50},
+    "gnews_tech":        {"tier": "T2", "score": 50},
+    "ithome":            {"tier": "T2", "score": 50},
+    "sspai":             {"tier": "T2", "score": 45},
+    "hackernews":        {"tier": "T3", "score": 45},
+    "github_trending":   {"tier": "T3", "score": 40},
+    "lobsters":          {"tier": "T3", "score": 40},
+    "reddit_technology": {"tier": "T3", "score": 35},
+    "reddit_programming":{"tier": "T3", "score": 35},
+    "reddit_localllama": {"tier": "T3", "score": 35},
+    "x_nintendo":        {"tier": "T2", "score": 55},
+    "x_openai":          {"tier": "T2", "score": 55},
+    "x_nvidia":          {"tier": "T2", "score": 50},
+    "x_wario64":         {"tier": "T3", "score": 45},
+    "x_timeline":        {"tier": "T2", "score": 50},
+    "x_sama":            {"tier": "T2", "score": 60},
+    "x_rowancheung":     {"tier": "T2", "score": 55},
+    "x_emollick":        {"tier": "T3", "score": 48},
+    "x_tibo":            {"tier": "T3", "score": 45}
+  },
+
+  "impact_scale": 14,
+  "impact_none": 20,
+  "entities": [
+    {"names": ["Steam", "Valve", "V社", "任天堂", "Nintendo", "Switch 2", "索尼", "Sony", "PlayStation", "PS5", "PS6", "Xbox", "微软", "Microsoft", "苹果", "Apple", "谷歌", "Google", "OpenAI", "Rockstar", "R星", "GTA 6", "Grand Theft Auto"], "w": 7},
+    {"names": ["GTA", "Epic Games", "FromSoftware", "宫崎英高", "艾尔登法环", "Elden Ring", "CDPR", "CD Projekt", "赛博朋克", "Cyberpunk", "巫师", "Witcher", "黑神话", "游戏科学", "米哈游", "原神", "绝区零", "崩坏", "星穹铁道", "崩铁", "鸣潮", "库洛游戏", "英伟达", "NVIDIA", "GeForce", "RTX", "AMD", "英特尔", "Intel", "Steam Deck", "Bethesda", "B社", "暴雪", "Blizzard", "Riot Games", "拳头", "英雄联盟", "League of Legends", "Valorant", "无畏契约", "腾讯", "Tencent", "Meta", "特斯拉", "Tesla", "华为", "Huawei", "小米", "Xiaomi", "Nintendo Switch"], "w": 6},
+    {"names": ["卡普空", "Capcom", "怪物猎人", "Monster Hunter", "生化危机", "Resident Evil", "Square Enix", "史克威尔", "最终幻想", "Final Fantasy", "Konami", "科乐美", "Sega", "世嘉", "Bandai", "万代南梦宫", "育碧", "Ubisoft", "EA Sports", "Electronic Arts", "Take-Two", "2K Games", "网易", "NetEase", "字节跳动", "ByteDance", "抖音", "TikTok", "Bilibili", "B站", "Anthropic", "Claude", "Gemini", "Copilot", "DeepSeek", "Llama", "ChatGPT", "Windows", "安卓", "Android", "骁龙", "Snapdragon", "联发科", "MediaTek", "台积电", "TSMC", "ASML", "Discord", "Reddit", "Spotify", "Netflix", "奈飞", "亚马逊", "Amazon"], "w": 5},
+    {"names": ["Game Pass", "XGP", "PSN", "ESRB", "PEGI", "SteamDB", "TGA", "Game Awards", "Gamescom", "科隆游戏展", "东京电玩展", "TGS", "PICO", "Quest"], "w": 4}
+  ],
+
+  "evidence_rules": [
+    {"words": ["官方", "宣布", "正式", "确认", "证实", "公告", "回应", "声明", "announced", "officially", "confirmed", "confirm", "confirms", "official", "statement", "press release", "unveil", "unveils", "unveiled"], "score": 78},
+    {"words": ["表示", "称", "透露", "指出", "according to", "said", "says", "told", "reveal", "reveals"], "score": 60},
+    {"words": ["传闻", "爆料", "疑似", "据传", "或将", "未经证实", "小道", "rumor", "rumors", "rumoured", "rumored", "reportedly", "allegedly", "unconfirmed", "claimed", "leaks suggest", "considers", "considering", "weighing", "mulls", "mulling", "exploring"], "score": 22}
+  ],
+
+  "rumor_markers": ["rumor", "rumors", "rumoured", "rumored", "reportedly", "allegedly", "unconfirmed", "传闻", "爆料", "疑似", "据传", "或将", "未经证实"],
+
+  "irreversibility_rules": [
+    {"words": ["停服", "关服", "停运", "停止运营", "关停", "停更", "下架", "收购", "并购", "裁员", "倒闭", "破产", "解散", "漏洞", "0day", "零日", "数据泄露", "泄露", "被黑", "黑客", "勒索", "诉讼", "起诉", "封禁", "封号", "制裁", "罚款", "逮捕", "拘留", "去世", "逝世", "召回", "事故", "shutdown", "shuts down", "shutting down", "acquisition", "acquires", "acquired", "merger", "buys", "layoff", "layoffs", "laid off", "job cuts", "bankruptcy", "breach", "hacked", "exploit", "zero-day", "ransomware", "lawsuit", "sues", "sued", "banned", "ban", "fined", "sanction", "arrested", "dies", "passed away", "discontinued", "end of life", "delisted", "recalled", "leak", "leaks", "leaked", "leaking", "data leak"], "score": 100},
+    {"words": ["更新", "补丁", "修复", "版本", "维护", "活动", "促销", "折扣", "打折", "降价", "免费领", "喜加一", "评测", "上手", "试玩", "访谈", "采访", "播客", "changelog", "patch", "patched", "update", "updated", "sale", "discount", "giveaway", "deal", "review", "hands-on", "interview", "podcast"], "score": 35},
+    {"words": ["传闻", "爆料", "疑似", "据传", "或将", "未经证实", "rumor", "rumors", "rumored", "reportedly", "allegedly", "unconfirmed"], "score": 20}
+  ],
+
+  "hook_time_words": ["发布会", "发表会", "直面会", "State of Play", "Nintendo Direct", "财报", "earnings", "发售", "发售日", "开售", "预售", "预购", "预约", "公测", "内测", "上线", "发布日期", "release date", "launch", "launches", "launching", "pre-order", "preorder", "开庭", "判决", "投票", "截止"],
+
+  "hook_controversy_words": ["争议", "道歉", "翻车", "差评", "抵制", "指控", "风波", "引众怒", "骂上", "起诉", "backlash", "controversy", "controversial", "apolog", "outrage", "lawsuit"],
+
+  "exclusivity": {"1": 100, "2": 70, "3": 50, "4": 35, "5+": 20},
+
+  "old_news_hours": 48,
+  "old_news_penalty": -20,
+
+  "thin_source": {"tier_score_max": 30, "penalty": -15}
+}

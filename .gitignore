@@ -16,6 +16,9 @@ out/
 .cache/
 *.log
 
+# MVP runtime data (regenerable; news snapshot + LLM decision cache)
+mvp/data/
+
 # OS / editor
 .DS_Store
 Thumbs.db

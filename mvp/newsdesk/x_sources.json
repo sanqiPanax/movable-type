@@ -1,0 +1,27 @@
+{
+  "_说明": "X / Twitter 源配置(newsdesk_x.py 每次抓取时读取,改完保存即生效,不用重启服务)。",
+
+  "enabled": true,
+  "ttl": 900,
+  "skip_contains": ["#ad"],
+
+  "feed": {
+    "_说明": "你账号的关注流(twitter-cli 的 feed)。这是最省额度的一路:1 次请求。",
+    "enabled": true,
+    "name": "X · 关注流",
+    "n": 30
+  },
+
+  "accounts": [
+    {"handle": "Nintendo", "name": "X · @Nintendo", "n": 10, "enabled": true},
+    {"handle": "Wario64", "name": "X · @Wario64", "n": 15, "enabled": true},
+    {"handle": "OpenAI", "name": "X · @OpenAI", "n": 10, "enabled": true},
+    {"handle": "nvidia", "name": "X · @NVIDIA", "n": 10, "enabled": true},
+    {"handle": "tibo", "name": "X · @tibo", "n": 10, "enabled": true},
+    {"handle": "sama", "name": "X · @sama", "n": 10, "enabled": true},
+    {"handle": "emollick", "name": "X · @emollick", "n": 10, "enabled": true},
+    {"handle": "rowancheung", "name": "X · @rowancheung", "n": 10, "enabled": true}
+  ],
+
+  "_accounts说明": "handle 不带 @。每加一个账号 = 每次抓取多 1 次真实 X 请求,建议总数 ≤ 8,否则容易被限流(限流时看板会自动退回上一次的缓存)。新增账号后,记得在 scoring_config.json 的 source_tiers 里给它补一条分值,否则默认 50 分。2026-09-29 按用户要求扩充:游戏圈 tibo(点名,游戏制作人 Thibaut)+ AI 圈人物 sama(OpenAI CEO)/emollick(AI 评论,Warton)/rowancheung(AI 新闻 newsletter 主理人)——挑时效性新闻优先看这批。"
+}
