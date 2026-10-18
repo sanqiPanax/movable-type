@@ -87,6 +87,25 @@ h1{font-size:30px;letter-spacing:.24em;margin:0 0 4px}
   padding:1px 7px;margin-right:8px;vertical-align:2px}
 .badge.arch{border-color:var(--muted);color:var(--muted)}
 .badge.unread{background:var(--seal);color:var(--paper);border-color:var(--seal)}
+.badge.corr{background:#7a5c1e;color:var(--paper);border-color:#7a5c1e}
+.badge.conf{background:#5c2e2e;color:var(--paper);border-color:#5c2e2e}
+button.rmnode{font:inherit;font-size:10px;letter-spacing:.1em;color:var(--muted);
+  background:none;border:1px solid var(--hair);border-radius:3px;padding:0 6px;
+  cursor:pointer;margin-left:6px;vertical-align:1px}
+button.rmnode:hover{color:var(--seal);border-color:var(--seal)}
+button.rmnode.ghost2{color:var(--seal);border-color:var(--seal)}
+.sect-h2{font-size:12px;letter-spacing:.3em;color:var(--seal);margin:24px 0 10px;
+  border-top:1px dashed var(--seal);padding-top:8px}
+.pcard{border:1px dotted var(--hair);background:rgba(255,252,240,.5);padding:10px 13px;
+  margin-bottom:10px}
+.pcard .ptitle{font-size:14.5px;font-weight:600;line-height:1.5}
+.pcard .ptitle a{color:var(--ink);text-decoration:none}
+.pcard .ptitle a:hover{color:var(--seal)}
+.pcard .pmeta{font-size:11px;color:var(--muted);margin:4px 0 7px}
+.pcard .pbtns{display:flex;gap:10px}
+.pcard .pbtns button{font:inherit;font-size:11px;letter-spacing:.08em;
+  background:var(--seal);color:var(--paper);border:0;padding:4px 12px;cursor:pointer}
+.pcard .pbtns button.ghost2{background:none;color:var(--seal);border:1px solid var(--seal)}
 .note{font-size:12.5px;color:var(--muted);line-height:1.7}
 .tl{list-style:none;margin:0;padding:0}
 .tl li{position:relative;padding:0 0 16px 22px;border-left:1px solid var(--rule);margin-left:6px}
@@ -222,9 +241,21 @@ def storyline_html(event_id):
         if n.get("is_unread"):
             cls.append("unread")
         url = n.get("url_canonical") or n.get("url_original") or "#"
-        btxt = ("未读" if n.get("is_unread")
-                else ("创始报道" if n.get("node_type") == "origin" else "进展"))
-        bcls = "unread" if n.get("is_unread") else ""
+        nstat = n.get("status") or "active"
+        if nstat == "corrected":
+            btxt, bcls = "已被来源更正", "corr"
+        elif nstat == "conflicted":
+            btxt, bcls = "来源说法不一致", "conf"
+        elif n.get("is_unread"):
+            btxt, bcls = "未读", "unread"
+        elif n.get("node_type") == "origin":
+            btxt, bcls = "创始报道", ""
+        else:
+            btxt, bcls = "进展", ""
+        # 人工纠错入口(SPEC §8 最小纠错): 非创始且未归档可移出
+        rmbtn = ("" if is_arch or n.get("node_type") == "origin" else
+                 " <button class='rmnode' data-nid='%s'>移出</button>"
+                 % esc(n.get("node_id")))
         # 来源证据链(C: 转述合并 -> 同一节点多来源, 可展开逐条溯源 SPEC §5第五步)
         srcs = n.get("sources") or []
         if len(srcs) > 1:
@@ -241,12 +272,31 @@ def storyline_html(event_id):
         else:
             srchtml = ""
         items.append(
-            "<li class='%s'><div class='tdate'>%s <span class='badge %s'>%s</span></div>"
+            "<li class='%s'><div class='tdate'>%s <span class='badge %s'>%s</span>%s</div>"
             "<div class='ttitle'><a href='%s' target='_blank' rel='noopener'>%s</a></div>"
             "<div class='tmeta'>来源 %s · 发表 %s · 收录于 %s</div>%s</li>"
-            % (" ".join(cls), tshow, bcls, btxt, esc(url), esc(n.get("title")),
+            % (" ".join(cls), tshow, bcls, btxt, rmbtn, esc(url), esc(n.get("title")),
                esc(n.get("source_id")), esc((n.get("published_at") or "")[:16]).replace("T", " "),
                esc((n.get("created_at") or "")[:16]).replace("T", " "), srchtml))
+
+    # 待确认材料区(SPEC §5第五步"无法确定->暂缓进入正式故事线";人工接受/驳回)
+    pending = st.get("pending_nodes") or []
+    pend_html = ""
+    if pending and not is_arch:
+        rows_p = []
+        for p in pending:
+            urlp = p.get("url_canonical") or p.get("url_original") or "#"
+            rows_p.append(
+                "<div class='pcard'><div class='ptitle'>"
+                "<a href='%s' target='_blank' rel='noopener'>%s</a></div>"
+                "<div class='pmeta'>来源 %s · 判定理由: %s</div>"
+                "<div class='pbtns'><button class='accnode' data-nid='%s'>接受进故事线</button>"
+                "<button class='rmnode ghost2' data-nid='%s'>驳回丢弃</button></div></div>"
+                % (esc(urlp), esc((p.get("title") or "")[:80]), esc(p.get("source_id")),
+                   esc(p.get("judge_reason") or "规则无法判定,LLM 判为材料不足"),
+                   esc(p.get("node_id")), esc(p.get("node_id"))))
+        pend_html = ("<div class='sect-h2'>待确认材料 %d 条"
+                     "(材料不足暂缓入线,不计未读)</div>%s" % (len(pending), "".join(rows_p)))
 
     if is_arch:
         btns = ("<div class='btns'><span class='msg'>已归档事件为只读快照;"
@@ -272,10 +322,24 @@ def storyline_html(event_id):
           "if(!confirm('结束追踪并归档?故事线会保留为只读快照,不再更新。'))return;"
           "post('/api/untrack',{event_id:'%s'},function(j){var m=document.getElementById('bmsg');"
           "if(j.error){m.textContent='未保存:'+j.error}"
-          "else{m.textContent='已归档';setTimeout(function(){location.reload()},600)}})})"
-          "</script>") % (esc(event_id), esc(event_id))
+          "else{m.textContent='已归档';setTimeout(function(){location.reload()},600)}})});"
+          # 人工纠错(SPEC §8): 移出主线节点 / 接受或驳回待确认材料
+          "document.addEventListener('click',function(e){"
+          "var b=e.target;if(!b.closest)return;var rm=b.closest('.rmnode');"
+          "var ac=b.closest('.accnode');"
+          "if(rm){if(!confirm('将该节点移出故事线?(证据一并移除,操作可回查但不可撤销)'))return;"
+          "rm.disabled=true;"
+          "post('/api/remove_node',{event_id:'%s',node_id:rm.getAttribute('data-nid')},"
+          "function(j){if(j.error){alert('未移出:'+j.error);rm.disabled=false}"
+          "else{location.reload()}});return}"
+          "if(ac){ac.disabled=true;"
+          "post('/api/accept_node',{event_id:'%s',node_id:ac.getAttribute('data-nid')},"
+          "function(j){if(j.error){alert('未接受:'+j.error);ac.disabled=false}"
+          "else{location.reload()}})}})"
+          "</script>") % (esc(event_id), esc(event_id), esc(event_id), esc(event_id))
 
-    inner = "".join(head) + btns + "<ul class='tl'>" + "".join(items) + "</ul>" + js
+    inner = ("".join(head) + btns + "<ul class='tl'>" + "".join(items) + "</ul>"
+             + pend_html + js)
     return page("故事脉络 · 活字新报", inner), 200
 
 
@@ -464,6 +528,22 @@ class Handler(BaseHTTPRequestHandler):
                 _json(self, 400, {"error": "缺少 event_id"})
                 return
             _json(self, 200, db.mark_read(eid))
+            return
+        if path == "/api/remove_node":     # 移出主线节点 / 驳回待确认材料
+            eid = (body.get("event_id") or "").strip()
+            nid = (body.get("node_id") or "").strip()
+            if not eid or not nid:
+                _json(self, 400, {"error": "缺少 event_id 或 node_id"})
+                return
+            _json(self, 200, db.remove_node(eid, nid))
+            return
+        if path == "/api/accept_node":     # 接受待确认材料进正式故事线
+            eid = (body.get("event_id") or "").strip()
+            nid = (body.get("node_id") or "").strip()
+            if not eid or not nid:
+                _json(self, 400, {"error": "缺少 event_id 或 node_id"})
+                return
+            _json(self, 200, db.accept_pending(eid, nid))
             return
         self.send_error(404)
 

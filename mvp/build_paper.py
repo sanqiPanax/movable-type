@@ -946,15 +946,17 @@ def main():
         log("入库失败(不影响出报): %r" % e)
         newsdesk_db = None
 
-    # 阶段B/C: 活跃事件的进展扫描(转述合并+关联质量;失败不拖垮出报)
+    # 阶段B/C: 活跃事件的进展扫描(转述合并/更正冲突/LLM归属;失败不拖垮出报)
     if newsdesk_db is not None:
         try:
             sc = newsdesk_db.scan_progress()
             act = {k: v for k, v in sc["per_event"].items()
-                   if isinstance(v, dict) and (v.get("added") or v.get("retold"))}
+                   if isinstance(v, dict) and (v.get("added") or v.get("retold")
+                                               or v.get("llm") or v.get("pending"))}
             if act:
-                log("进展扫描: 新增节点 %d | 转述并入 %d | %s"
-                    % (sc["added"], sc["retold"], act))
+                log("进展扫描: 新增节点 %d(LLM判%d) | 转述并入 %d | 待确认 %d | %s"
+                    % (sc["added"] + sc.get("llm_added", 0), sc.get("llm_added", 0),
+                       sc["retold"], sc.get("llm_pending", 0), act))
             else:
                 log("进展扫描: %d 活跃事件, 无新增" % len(sc["per_event"]))
         except Exception as e:
