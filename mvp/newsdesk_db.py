@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS articles (
   first_seen_run    INTEGER,
   current_version   INTEGER DEFAULT 1,
   content_hash      TEXT,
-  status            TEXT DEFAULT 'ok'
+  status            TEXT DEFAULT 'ok',
+  score       INTEGER,                          -- 六维总分(annotate 算出,公共重要选稿用)
+  score_d     TEXT                              -- 六维明细 JSON(src/imp/ex/ev/irr/hk)
 );
 CREATE INDEX IF NOT EXISTS idx_articles_source ON articles(source_id);
 CREATE INDEX IF NOT EXISTS idx_articles_pub ON articles(published_at);
@@ -132,13 +134,31 @@ CREATE INDEX IF NOT EXISTS idx_ev_node ON node_evidence(node_id);
 CREATE TABLE IF NOT EXISTS decisions (
   article_id  TEXT,
   event_id    TEXT,
-  verdict     TEXT,                             -- same_event|related|unrelated|insufficient|retell|corrected
+  verdict     TEXT,                             -- same_event|related|unrelated|insufficient|retell|corrected|removed
   reason      TEXT,
   prompt_ver  TEXT,
   model       TEXT,
   created_at  TEXT,
   PRIMARY KEY (article_id, event_id)
 );
+-- ============ 阶段D: 展示批次(SPEC §4 Issue / §5第七步 三分区配额) ============
+CREATE TABLE IF NOT EXISTS issues (
+  issue_no    INTEGER PRIMARY KEY,              -- 期号(与报纸期号一致)
+  seed        TEXT,                             -- 抽样种子(同seed+同输入=同清单, SPEC验收)
+  quota_cfg   TEXT,                             -- 各分区配额 JSON(可配置,不按点击行为改变)
+  fingerprint TEXT,                             -- 输入材料版本指纹
+  generated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS issue_items (
+  issue_no    INTEGER,
+  article_id  TEXT,
+  node_id     TEXT,                             -- 追踪更新条目关联节点(可空)
+  partition   TEXT,                             -- explore|important|tracking
+  tags        TEXT,                             -- 多标签 JSON(同一内容占多分区只展示一次)
+  position    INTEGER,
+  PRIMARY KEY (issue_no, article_id)
+);
+CREATE INDEX IF NOT EXISTS idx_issue_items_art ON issue_items(article_id);
 """
 
 
@@ -198,10 +218,16 @@ def connect(db_path=None):
 
 def _migrate(conn):
     """存量库轻量迁移: CREATE IF NOT EXISTS 不会给已存在的表加列。幂等。"""
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(nodes)").fetchall()}
-    if "status" not in cols:
+    n_cols = {r["name"] for r in conn.execute("PRAGMA table_info(nodes)").fetchall()}
+    if "status" not in n_cols:
         conn.execute("ALTER TABLE nodes ADD COLUMN status TEXT DEFAULT 'active'")
-        conn.commit()
+    a_cols = {r["name"] for r in conn.execute("PRAGMA table_info(articles)").fetchall()}
+    if "score" not in a_cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN score INTEGER")
+        conn.execute("ALTER TABLE articles ADD COLUMN score_d TEXT")
+        # 索引必须在列存在后建(放 SCHEMA 会在迁移前炸掉旧库连接)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_score ON articles(score)")
+    conn.commit()
 
 
 def record_run(conn, stage, fingerprint, result, new=0, updated=0, skipped=0,
@@ -263,6 +289,8 @@ def import_snapshot(data, db_path=None):
                 continue
             aid = article_id_for(canon)
             ch = content_hash_of(it.get("title"), it.get("desc"))
+            sc = it.get("score")
+            scd = json.dumps(it.get("score_d"), ensure_ascii=False) if it.get("score_d") else None
             row = conn.execute(
                 "SELECT current_version, content_hash FROM articles WHERE article_id=?",
                 (aid,)).fetchone()
@@ -270,10 +298,11 @@ def import_snapshot(data, db_path=None):
                 conn.execute(
                     "INSERT INTO articles(article_id,url_original,url_canonical,source_id,"
                     "title,summary,published_at,published_precision,collected_at,group_name,"
-                    "first_seen_run,current_version,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "first_seen_run,current_version,content_hash,score,score_d)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (aid, it.get("url"), canon, it.get("src_id"), it.get("title"),
                      it.get("desc"), it.get("ts"), _precision(it.get("ts")), now_iso,
-                     it.get("group"), run_id, 1, ch))
+                     it.get("group"), run_id, 1, ch, sc, scd))
                 conn.execute(
                     "INSERT INTO article_versions(article_id,version,title,summary,"
                     "content_hash,observed_at,run_id) VALUES(?,?,?,?,?,?,?)",
@@ -281,12 +310,18 @@ def import_snapshot(data, db_path=None):
                 new += 1
             elif row["content_hash"] == ch:
                 skipped += 1
+                # 存量补分: 阶段A入库时 items 尚无评分 -> 同内容重入时补写(幂等)
+                if sc is not None:
+                    conn.execute(
+                        "UPDATE articles SET score=?, score_d=?"
+                        " WHERE article_id=? AND (score IS NULL OR score!=?)",
+                        (sc, scd, aid, sc))
             else:
                 v = row["current_version"] + 1
                 conn.execute(
                     "UPDATE articles SET title=?,summary=?,current_version=?,content_hash=?,"
-                    "collected_at=? WHERE article_id=?",
-                    (it.get("title"), it.get("desc"), v, ch, now_iso, aid))
+                    "collected_at=?,score=?,score_d=? WHERE article_id=?",
+                    (it.get("title"), it.get("desc"), v, ch, now_iso, sc, scd, aid))
                 conn.execute(
                     "INSERT INTO article_versions(article_id,version,title,summary,"
                     "content_hash,observed_at,run_id) VALUES(?,?,?,?,?,?,?)",

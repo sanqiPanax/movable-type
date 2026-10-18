@@ -29,7 +29,7 @@ OUT_DIR = os.path.join(HERE, "out")
 IMG_DIR = os.path.join(OUT_DIR, "img")
 CRED_FILE = r"C:\Users\Lenovo\.dsh\.credentials.yaml"
 NEWDESK_DIR = os.path.join(HERE, "newsdesk")
-PROMPT_VER = "v2pages"          # 提示词版本, 进决策缓存签名, 改提示词自动失效
+PROMPT_VER = "v3partition"  # 提示词版本, 进决策缓存签名, 改提示词自动失效
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -127,6 +127,7 @@ def cands_payload(cands):
             "s": (it.get("src") or "")[:40],
             "g": it.get("group") or "",
             "sc": it.get("score"),
+            "p": it.get("_partition") or "",   # 阶段D三分区标签(SPEC §5第七步)
         })
     return out
 
@@ -134,19 +135,24 @@ def cands_payload(cands):
 # ---------------------------------------------------------------- AI 主编
 EDITOR_SYS = """你是《活字新报》的主编。你只做两件事:选择与编排。绝不改写、翻译、补写任何标题或摘要,版面文字全部来自给定原文。
 输出必须是一个 JSON 对象,不要输出任何其他文字。"""
-EDITOR_TPL = """本期为多版报纸。版面结构与容量:
+EDITOR_TPL = """本期为多版报纸。**候选已经过三分区配额精选(约20条=本期全部展示名额),尽量全部安排进版面**;
+确有同题重复/标题党才 dropped。版面结构与容量:
 - 头版:各版最重要新闻的摘要页。lead_id = 全期最重要的一条(通常就是某版的第一条)。
 - 科技版 6~8 条:每块必须给 sub("软件"|"硬件")——芯片/手机/PC/相机/服务器等实体设备与半导体→"硬件";AI/应用/编程/互联网/安全/云服务→"软件"。
-- 游戏版 4~5 条;金融版 4~5 条;政治版 4~5 条;生活版 3~4 条。总数 20~25。
-- 每版内部按重要度降序;每版第一条 = 本版头条(会出现在头版摘要卡)。
+- 游戏版/金融版/政治版/生活版 各 3~5 条,按实际候选灵活。
+
+候选分区(字段 p, 排版时必须尊重):
+- p=important 公共重要: 权威来源+可核验证据筛选, 公共价值高 -> 优先给好版位(头版/每版头条)。
+- p=tracking 追踪更新: 读者已追踪事件的新进展 -> 优先上头版摘要卡与显著版位。
+- p=explore 随机探索: 按类别公平轮换抽出的普通新闻, 保证跨领域可见 -> 正常排版, 不因来源冷门降权。
 
 选稿规则:
 1. 归版按条目内容判断,g(来源分组)仅供参考:消费电子/芯片/PC→科技-硬件;AI/软件/互联网→科技-软件;游戏→游戏;股市/财报/经济/央行政策→金融;选举/法案/外交/政府→政治;社会/消费/健康/其余→生活。
 2. 同题重复只上一条;英文条目照原文保留,不翻译;标题党/摘要只等于标题的不上每版头条。
-3. dropped:从落选池挑最多 6 条读者会问「为什么没上」的,各写一句中文理由(只讲取舍,不重复新闻事实)。
+3. dropped:从落选池挑最多 4 条读者会问「为什么没上」的,各写一句中文理由(只讲取舍,不重复新闻事实)。
 4. editor_note 一句话讲本期取舍思路(<=50字,中文,不得陈述新闻事实)。
 
-候选条目(字段:i 唯一id / t 标题 / d 摘要 / dl 摘要长度 / s 来源 / g 分组 / sc 评分):
+候选条目(字段:i 唯一id / t 标题 / d 摘要 / dl 摘要长度 / s 来源 / g 分组 / sc 评分 / p 分区):
 __CANDS__
 
 输出 JSON 结构(name 只能取:科技/游戏/金融/政治/生活;科技块 sub 必填;其余版不要 sub):
@@ -507,6 +513,12 @@ body.tk-on .trk{display:inline-block}
 .trackregion{grid-column:span 12;margin-top:20px;border:1px solid var(--rule);
   background:rgba(255,252,240,.5);padding:12px 16px}
 .trackregion h5{margin:0 0 8px;font-size:11.5px;letter-spacing:.3em;color:var(--seal)}
+.ovbox{border:1px solid var(--seal);background:rgba(158,43,37,.05);padding:10px 12px;margin-bottom:14px}
+.ovbox h5{margin:0 0 5px;font-size:11px;letter-spacing:.24em;color:var(--seal)}
+.ovbox .ovnote{font-size:10.5px;color:var(--muted);line-height:1.6;margin:0 0 6px}
+.ovbox .ovrow{font-size:12.5px;line-height:1.6;border-top:1px dotted var(--hair);padding:4px 0}
+.ovbox .ovrow a{color:var(--ink);text-decoration:none}
+.ovbox .ovrow a:hover{color:var(--seal)}
 .trackregion h5 a{color:var(--seal);text-decoration:none;letter-spacing:.1em;font-size:10px;margin-left:10px}
 .trackregion h5 a:hover{text-decoration:underline}
 .trackregion .tempty{font-size:12px;color:var(--muted);line-height:1.7}
@@ -558,7 +570,7 @@ footer{margin-top:18px;border-top:1px solid var(--rule);padding-top:8px;
 """
 
 
-def render(ctx, images, gen_at, stats, period):
+def render(ctx, images, gen_at, stats, period, overflow=None):
     lead_it = ctx["lead"][1]
     lead_id = ctx["lead_id"]
 
@@ -651,11 +663,22 @@ def render(ctx, images, gen_at, stats, period):
             '<div class="meta">%s · <a href="%s" target="_blank" rel="noopener">原文</a>%s　%s</div></div>'
             % (160 + len(digest) * 90, esc_(name), esc_(latin), esc_(it.get("title")),
                esc_(meta_line(it)), esc_(it.get("url")), trk_btn(it), same))
+    # 阶段D: 公共重要溢出区(SPEC §5第七步"重要消息补充": 超出4条配额不挤占探索名额)
+    ov_html = ""
+    if overflow:
+        ov_items = "".join(
+            '<div class="ovrow"><a href="%s" target="_blank" rel="noopener">%s</a></div>'
+            % (esc_(o["url"]), esc_(o["title"])) for o in overflow[:5])
+        ov_html = ('<div class="ovbox blk ink" style="--d:120ms">'
+                   '<h5>重要消息补充 · BEYOND QUOTA</h5>'
+                   '<p class="ovnote">公共重要信息超出 4 条展示配额,溢出项在此列出,不挤占随机探索名额。</p>'
+                   '%s</div>' % ov_items)
     side_html = """
 <aside class="side blk">
+  %s
   <h3>本版各版头条 <span>SECTION LEADS</span></h3>
   %s
-</aside>""" % "".join(digest)
+</aside>""" % (ov_html, "".join(digest))
 
     # 主编手记(仅头版)
     drops_html = "".join("<li><b>弃</b> %s — %s</li>" % (esc_(ctx["by_id"][d["item_id"]][1].get("title"))[:46],
@@ -962,8 +985,44 @@ def main():
         except Exception as e:
             log("进展扫描失败(不影响出报): %r" % e)
 
-    cands = coarse(items)
-    log("粗筛候选 %d" % len(cands))
+    period = max(1, (datetime.date.today() - datetime.date(2026, 9, 21)).days + 1)
+
+    # 阶段D: 本期三分区选稿(SPEC §5第七步; seed按期保存, 同seed+同输入=同清单)
+    cands = []
+    sel = None
+    overflow_titles = []
+    try:
+        import newsdesk_selection as sel_mod
+        sel = sel_mod.build_issue(period)
+        log("选稿(seed=%s): 探索%d/重要%d/追踪%d | 缺额回补%d | 溢出重要%d | 指纹%s"
+            % (sel["seed"], sel["counts"]["explore"], sel["counts"]["important"],
+               sel["counts"]["tracking"], sel["shortfall_backfilled"],
+               len(sel["overflow_important"]), sel["fingerprint"]))
+        if sel["overflow_important"]:
+            conn_d = newsdesk_db.connect()
+            try:
+                for oid in sel["overflow_important"]:
+                    r = conn_d.execute(
+                        "SELECT title, url_original FROM articles WHERE article_id=?",
+                        (oid,)).fetchone()
+                    if r:
+                        overflow_titles.append({"title": r["title"],
+                                                "url": r["url_original"]})
+            finally:
+                conn_d.close()
+        rows = sel_mod.issue_items(period)
+        cands = [{
+            "title": r["title"], "desc": r["summary"], "url": r["url_original"],
+            "src": r["source_id"], "src_id": r["source_id"],
+            "group": r["group_name"], "ts": r["published_at"], "score": r["score"],
+            "_partition": r["partition"]} for r in rows]
+        log("本期候选 %d 条(三分区精选)" % len(cands))
+    except Exception as e:
+        log("选稿失败(回退粗筛): %r" % e)
+        cands = []
+    if not cands:
+        cands = coarse(items)
+        log("粗筛候选 %d" % len(cands))
 
     # 决策缓存:签名含提示词版本,改提示词自动失效
     sig = hashlib.sha1((PROMPT_VER + json.dumps(cands_payload(cands),
@@ -1001,9 +1060,8 @@ def main():
     gen_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     ok_src = sum(1 for s in data.get("sources", []) if s.get("status") in ("ok", "cached"))
     stats = "信息台 %d 源可用 · 全库 %d 条" % (ok_src, len(items))
-    period = max(1, (datetime.date.today() - datetime.date(2026, 9, 21)).days + 1)
 
-    doc = render(ctx, images, gen_at, stats, period)
+    doc = render(ctx, images, gen_at, stats, period, overflow=overflow_titles)
     os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, "index.html")
     open(out, "w", encoding="utf-8").write(doc)
